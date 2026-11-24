@@ -1,6 +1,7 @@
 import 'dart:convert';
 import 'dart:io';
 
+import 'package:flutter/foundation.dart';
 import 'package:path_provider/path_provider.dart';
 
 import '../models/playlist.dart';
@@ -196,7 +197,8 @@ class StorageService {
       final decoded = jsonDecode(content);
       if (decoded is! Map) return NovenSavedState.defaults;
       return NovenSavedState.fromJson(Map<String, dynamic>.from(decoded));
-    } catch (_) {
+    } catch (e, st) {
+      debugPrint('[StorageService.load] Error reading $_fileName: $e\n$st');
       return NovenSavedState.defaults;
     }
   }
@@ -210,7 +212,9 @@ class StorageService {
         }
         const encoder = JsonEncoder.withIndent('  ');
         await file.writeAsString(encoder.convert(state.toJson()), flush: true);
-      } catch (_) {}
+      } catch (e, st) {
+        debugPrint('[StorageService.save] Error writing $_fileName: $e\n$st');
+      }
     });
     return _writeQueue;
   }
