@@ -1,3 +1,5 @@
+import 'dart:io';
+
 import 'package:flutter/material.dart';
 
 import '../../models/track.dart';
@@ -42,16 +44,21 @@ class CoverArt extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     Widget content;
-    if (track?.coverBytes != null) {
-      content = Image.memory(
-        track!.coverBytes!,
+    final coverPath = track?.coverPath;
+    final coverUrl = track?.coverUrl;
+
+    if (coverPath != null && coverPath.isNotEmpty) {
+      content = Image.file(
+        File(coverPath),
         width: size,
         height: size,
         fit: BoxFit.cover,
+        cacheWidth: (size * 2).round(),
+        errorBuilder: (_, _, _) => _buildPlaceholder(),
       );
-    } else if (track?.coverUrl != null) {
+    } else if (coverUrl != null && coverUrl.isNotEmpty) {
       content = Image.network(
-        track!.coverUrl!,
+        coverUrl,
         width: size,
         height: size,
         fit: BoxFit.cover,

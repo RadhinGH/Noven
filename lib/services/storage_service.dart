@@ -2,6 +2,7 @@ import 'dart:convert';
 import 'dart:io';
 
 import 'package:flutter/foundation.dart';
+import 'package:path/path.dart' as p;
 import 'package:path_provider/path_provider.dart';
 
 import '../models/playlist.dart';
@@ -33,7 +34,33 @@ class CustomStreamEntry {
   }
 }
 
+enum StorageLoadStatus {
+  ok,
+  notFound,
+  migrated,
+  recoveredFromBackup,
+  corrupted,
+}
+
+class StorageLoadResult {
+  final NovenSavedState state;
+  final StorageLoadStatus status;
+  final String? message;
+  final String? corruptBackupPath;
+
+  const StorageLoadResult({
+    required this.state,
+    required this.status,
+    this.message,
+    this.corruptBackupPath,
+  });
+}
+
 class NovenSavedState {
+  static const int currentSchemaVersion = 2;
+
+  final int schemaVersion;
+  final bool legacyLibraryMigrated;
   final List<String> localFolders;
   final List<String> localFiles;
   final List<CustomStreamEntry> customStreams;
@@ -47,6 +74,8 @@ class NovenSavedState {
   final int lastPositionMs;
 
   const NovenSavedState({
+    this.schemaVersion = currentSchemaVersion,
+    this.legacyLibraryMigrated = false,
     required this.localFolders,
     required this.localFiles,
     required this.customStreams,
@@ -61,6 +90,8 @@ class NovenSavedState {
   });
 
   static const defaults = NovenSavedState(
+    schemaVersion: currentSchemaVersion,
+    legacyLibraryMigrated: false,
     localFolders: [],
     localFiles: [],
     customStreams: [],
@@ -74,7 +105,44 @@ class NovenSavedState {
     lastPositionMs: 0,
   );
 
+  NovenSavedState copyWith({
+    int? schemaVersion,
+    bool? legacyLibraryMigrated,
+    List<String>? localFolders,
+    List<String>? localFiles,
+    List<CustomStreamEntry>? customStreams,
+    Map<String, bool>? sourceEnabled,
+    double? volume,
+    bool? isMuted,
+    bool? shuffle,
+    PlaybackRepeatMode? repeatMode,
+    List<Playlist>? playlists,
+    String? lastTrackId,
+    bool clearLastTrackId = false,
+    int? lastPositionMs,
+  }) {
+    return NovenSavedState(
+      schemaVersion: schemaVersion ?? this.schemaVersion,
+      legacyLibraryMigrated:
+          legacyLibraryMigrated ?? this.legacyLibraryMigrated,
+      localFolders: localFolders ?? this.localFolders,
+      localFiles: localFiles ?? this.localFiles,
+      customStreams: customStreams ?? this.customStreams,
+      sourceEnabled: sourceEnabled ?? this.sourceEnabled,
+      volume: volume ?? this.volume,
+      isMuted: isMuted ?? this.isMuted,
+      shuffle: shuffle ?? this.shuffle,
+      repeatMode: repeatMode ?? this.repeatMode,
+      playlists: playlists ?? this.playlists,
+      lastTrackId:
+          clearLastTrackId ? null : (lastTrackId ?? this.lastTrackId),
+      lastPositionMs: lastPositionMs ?? this.lastPositionMs,
+    );
+  }
+
   Map<String, dynamic> toJson() => {
+        'schemaVersion': schemaVersion,
+        'legacyLibraryMigrated': legacyLibraryMigrated,
         'localFolders': localFolders,
         'localFiles': localFiles,
         'customStreams': customStreams.map((e) => e.toJson()).toList(),
@@ -89,14 +157,28 @@ class NovenSavedState {
       };
 
   factory NovenSavedState.fromJson(Map<String, dynamic> json) {
+    final rawVersion = json['schemaVersion'];
+    final schemaVersion =
+        rawVersion is num ? rawVersion.toInt() : currentSchemaVersion;
+
+    final rawLegacyMigrated = json['legacyLibraryMigrated'];
+    final legacyLibraryMigrated =
+        rawLegacyMigrated is bool ? rawLegacyMigrated : false;
+
     final rawFolders = json['localFolders'];
     final folders = rawFolders is List
-        ? rawFolders.whereType<String>().where((s) => s.trim().isNotEmpty).toList()
+        ? rawFolders
+            .whereType<String>()
+            .where((s) => s.trim().isNotEmpty)
+            .toList()
         : <String>[];
 
     final rawFiles = json['localFiles'];
     final files = rawFiles is List
-        ? rawFiles.whereType<String>().where((s) => s.trim().isNotEmpty).toList()
+        ? rawFiles
+            .whereType<String>()
+            .where((s) => s.trim().isNotEmpty)
+            .toList()
         : <String>[];
 
     final rawStreams = json['customStreams'];
@@ -154,9 +236,10 @@ class NovenSavedState {
     }
 
     final rawLastTrackId = json['lastTrackId'];
-    final lastTrackId = rawLastTrackId is String && rawLastTrackId.trim().isNotEmpty
-        ? rawLastTrackId.trim()
-        : null;
+    final lastTrackId =
+        rawLastTrackId is String && rawLastTrackId.trim().isNotEmpty
+            ? rawLastTrackId.trim()
+            : null;
 
     final rawLastPos = json['lastPositionMs'];
     final lastPositionMs = rawLastPos is num
@@ -164,6 +247,8 @@ class NovenSavedState {
         : 0;
 
     return NovenSavedState(
+      schemaVersion: schemaVersion,
+      legacyLibraryMigrated: legacyLibraryMigrated,
       localFolders: folders,
       localFiles: files,
       customStreams: streams,
@@ -181,41 +266,252 @@ class NovenSavedState {
 
 class StorageService {
   static const _fileName = 'noven_data.json';
-  Future<void> _writeQueue = Future.value();
+  static const _tmpFileName = 'noven_data.json.tmp';
+  static const _bakFileName = 'noven_data.json.bak';
+  static const _bakTmpFileName = 'noven_data.json.bak.tmp';
+  static const _corruptFileName = 'noven_data.json.corrupt';
 
-  Future<File> _getDataFile() async {
-    final dir = await getApplicationSupportDirectory();
-    return File('${dir.path}${Platform.pathSeparator}$_fileName');
+  final Future<Directory> Function() _directoryProvider;
+  Future<void> _writeQueue = Future.value();
+  bool _corruptUnrecovered = false;
+
+  StorageService({Future<Directory> Function()? directoryProvider})
+      : _directoryProvider =
+            directoryProvider ?? getApplicationSupportDirectory;
+
+  bool get hasUnrecoveredCorruption => _corruptUnrecovered;
+
+  /// Migrates raw settings JSON from older schemas up to
+  /// [NovenSavedState.currentSchemaVersion].
+  static ({Map<String, dynamic> json, bool migrated}) migrateJson(
+    Map<String, dynamic> raw,
+  ) {
+    final copy = Map<String, dynamic>.from(raw);
+    final rawVersion = copy['schemaVersion'];
+    final version = rawVersion is num ? rawVersion.toInt() : 1;
+
+    if (version == NovenSavedState.currentSchemaVersion) {
+      return (json: copy, migrated: false);
+    }
+
+    if (version > NovenSavedState.currentSchemaVersion) {
+      debugPrint(
+        '[StorageService.migrateJson] Schema version $version is newer than '
+        'supported ${NovenSavedState.currentSchemaVersion}; parsing defensively.',
+      );
+      return (json: copy, migrated: false);
+    }
+
+    var current = version;
+    var migrated = false;
+
+    if (current < 2) {
+      copy['schemaVersion'] = 2;
+      copy['legacyLibraryMigrated'] ??= false;
+      if (copy['sourceEnabled'] is! Map) {
+        copy['sourceEnabled'] = {'local': true, 'online': true};
+      }
+      if (copy['playlists'] is! List) {
+        copy['playlists'] = <dynamic>[];
+      }
+      final rawPos = copy['lastPositionMs'];
+      if (rawPos is! num || rawPos < 0) {
+        copy['lastPositionMs'] = 0;
+      }
+      current = 2;
+      migrated = true;
+    }
+
+    return (json: copy, migrated: migrated);
   }
 
-  Future<NovenSavedState> load() async {
+  Future<File> _file(String name) async {
+    final dir = await _directoryProvider();
+    return File(p.join(dir.path, name));
+  }
+
+  Future<({NovenSavedState state, bool migrated})> _parseFile(File file) async {
+    final content = await file.readAsString();
+    if (content.trim().isEmpty) {
+      throw const FormatException('Settings file is empty');
+    }
+    final decoded = jsonDecode(content);
+    if (decoded is! Map) {
+      throw const FormatException('Settings JSON root is not an object');
+    }
+    final migration = migrateJson(Map<String, dynamic>.from(decoded));
+    final state = NovenSavedState.fromJson(migration.json);
+    return (state: state, migrated: migration.migrated);
+  }
+
+  Future<String?> _quarantineCorruptFile(File mainFile) async {
     try {
-      final file = await _getDataFile();
-      if (!file.existsSync()) return NovenSavedState.defaults;
-      final content = await file.readAsString();
-      if (content.trim().isEmpty) return NovenSavedState.defaults;
-      final decoded = jsonDecode(content);
-      if (decoded is! Map) return NovenSavedState.defaults;
-      return NovenSavedState.fromJson(Map<String, dynamic>.from(decoded));
+      var corruptFile = await _file(_corruptFileName);
+      if (corruptFile.existsSync()) {
+        final ts = DateTime.now().millisecondsSinceEpoch;
+        corruptFile = await _file('noven_data.json.$ts.corrupt');
+      }
+      await _safeReplaceFile(mainFile, corruptFile);
+      return corruptFile.path;
     } catch (e, st) {
-      debugPrint('[StorageService.load] Error reading $_fileName: $e\n$st');
-      return NovenSavedState.defaults;
+      debugPrint(
+        '[StorageService.load] Failed to quarantine corrupt $_fileName: $e\n$st',
+      );
+      return null;
     }
   }
 
-  Future<void> save(NovenSavedState state) {
-    _writeQueue = _writeQueue.then((_) async {
-      try {
-        final file = await _getDataFile();
-        if (!file.parent.existsSync()) {
-          await file.parent.create(recursive: true);
+  Future<StorageLoadResult> loadWithStatus() async {
+    try {
+      final mainFile = await _file(_fileName);
+      final bakFile = await _file(_bakFileName);
+
+      if (mainFile.existsSync()) {
+        try {
+          final parsed = await _parseFile(mainFile);
+          _corruptUnrecovered = false;
+          return StorageLoadResult(
+            state: parsed.state,
+            status: parsed.migrated
+                ? StorageLoadStatus.migrated
+                : StorageLoadStatus.ok,
+          );
+        } catch (e, st) {
+          debugPrint(
+            '[StorageService.load] Corrupt $_fileName detected: $e\n$st',
+          );
+          final corruptPath = await _quarantineCorruptFile(mainFile);
+
+          if (bakFile.existsSync()) {
+            try {
+              final bakParsed = await _parseFile(bakFile);
+              _corruptUnrecovered = false;
+              debugPrint(
+                '[StorageService.load] Recovered settings from $_bakFileName.',
+              );
+              return StorageLoadResult(
+                state: bakParsed.state,
+                status: StorageLoadStatus.recoveredFromBackup,
+                corruptBackupPath: corruptPath,
+                message:
+                    'File pengaturan rusak dan telah dipulihkan dari backup.',
+              );
+            } catch (bakErr, bakSt) {
+              debugPrint(
+                '[StorageService.load] Backup $_bakFileName also invalid: $bakErr\n$bakSt',
+              );
+            }
+          }
+
+          _corruptUnrecovered = true;
+          return StorageLoadResult(
+            state: NovenSavedState.defaults,
+            status: StorageLoadStatus.corrupted,
+            corruptBackupPath: corruptPath,
+            message:
+                'File pengaturan rusak & disimpan ke .corrupt (tidak ditimpa).',
+          );
         }
+      }
+
+      if (bakFile.existsSync()) {
+        try {
+          final bakParsed = await _parseFile(bakFile);
+          _corruptUnrecovered = false;
+          debugPrint(
+            '[StorageService.load] Main file missing; recovered from $_bakFileName.',
+          );
+          return StorageLoadResult(
+            state: bakParsed.state,
+            status: StorageLoadStatus.recoveredFromBackup,
+            message: 'File utama tidak ditemukan; dipulihkan dari backup.',
+          );
+        } catch (e, st) {
+          debugPrint(
+            '[StorageService.load] Orphan $_bakFileName invalid: $e\n$st',
+          );
+        }
+      }
+
+      _corruptUnrecovered = false;
+      return const StorageLoadResult(
+        state: NovenSavedState.defaults,
+        status: StorageLoadStatus.notFound,
+      );
+    } catch (e, st) {
+      debugPrint('[StorageService.load] Unexpected error: $e\n$st');
+      return const StorageLoadResult(
+        state: NovenSavedState.defaults,
+        status: StorageLoadStatus.notFound,
+      );
+    }
+  }
+
+  Future<NovenSavedState> load() async {
+    final result = await loadWithStatus();
+    return result.state;
+  }
+
+  /// Atomically writes [state] to `noven_data.json` via temp file + rename,
+  /// preserving the previous valid file in `noven_data.json.bak`.
+  ///
+  /// When [hasUnrecoveredCorruption] is true, saves are skipped unless
+  /// [allowOverwriteCorrupt] is true so corrupted settings are never silently
+  /// overwritten with defaults.
+  Future<bool> save(
+    NovenSavedState state, {
+    bool allowOverwriteCorrupt = false,
+  }) {
+    final op = _writeQueue.then((_) async {
+      if (_corruptUnrecovered && !allowOverwriteCorrupt) {
+        debugPrint(
+          '[StorageService.save] Skipping save because unrecovered corrupt '
+          'file was detected.',
+        );
+        return false;
+      }
+
+      try {
+        final mainFile = await _file(_fileName);
+        final tmpFile = await _file(_tmpFileName);
+        final bakFile = await _file(_bakFileName);
+        final bakTmpFile = await _file(_bakTmpFileName);
+
+        if (!mainFile.parent.existsSync()) {
+          await mainFile.parent.create(recursive: true);
+        }
+
         const encoder = JsonEncoder.withIndent('  ');
-        await file.writeAsString(encoder.convert(state.toJson()), flush: true);
+        final payload = encoder.convert(
+          state.copyWith(schemaVersion: NovenSavedState.currentSchemaVersion).toJson(),
+        );
+        await tmpFile.writeAsString(payload, flush: true);
+
+        if (mainFile.existsSync()) {
+          await mainFile.copy(bakTmpFile.path);
+          await _safeReplaceFile(bakTmpFile, bakFile);
+        }
+
+        await _safeReplaceFile(tmpFile, mainFile);
+        _corruptUnrecovered = false;
+        return true;
       } catch (e, st) {
         debugPrint('[StorageService.save] Error writing $_fileName: $e\n$st');
+        return false;
       }
     });
-    return _writeQueue;
+    _writeQueue = op.then((_) {});
+    return op;
+  }
+
+  Future<void> _safeReplaceFile(File source, File target) async {
+    try {
+      await source.rename(target.path);
+    } on FileSystemException {
+      if (target.existsSync()) {
+        await target.delete();
+      }
+      await source.rename(target.path);
+    }
   }
 }

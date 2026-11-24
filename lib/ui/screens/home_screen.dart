@@ -1,3 +1,4 @@
+import 'dart:async';
 import 'dart:io';
 import 'dart:math' as math;
 
@@ -7,7 +8,10 @@ import '../../models/playlist.dart';
 import '../../models/repeat_mode.dart';
 import '../../models/track.dart';
 import '../../services/audio_engine.dart';
+import '../../services/cover_cache_service.dart';
+import '../../services/library_database.dart';
 import '../../services/lyrics_service.dart';
+import '../../services/persistence_guard.dart';
 import '../../services/storage_service.dart';
 import '../../sources/local_source.dart';
 import '../../sources/music_source.dart';
@@ -44,12 +48,25 @@ class HomeScreen extends StatefulWidget {
 class _HomeScreenState extends State<HomeScreen> with WidgetsBindingObserver {
   final AudioEngine _engine = AudioEngine();
   final StorageService _storage = StorageService();
+  final LibraryDatabase _libraryDb = LibraryDatabase();
+  final CoverCacheService _coverCache = CoverCacheService();
   final LyricsService _lyricsService = LyricsService();
   final math.Random _random = math.Random();
 
-  final LocalMusicSource _localSource = LocalMusicSource();
+  late final LocalMusicSource _localSource = LocalMusicSource(
+    db: _libraryDb,
+    coverCache: _coverCache,
+  );
   final OnlineStreamSource _onlineSource = OnlineStreamSource();
   late final List<MusicSource> _sources = [_localSource, _onlineSource];
+  late final PersistenceGuard _saveGuard = PersistenceGuard(
+    onSave: _persistState,
+  );
+
+  Timer? _playbackPersistTimer;
+  bool _legacyLibraryMigrated = false;
+  bool _allowOverwriteAfterCorrupt = false;
+  bool _isBackgroundRescanning = false;
 
   int _selectedMenuIndex = 0; // 0 = Home, 1 = Library, 2 = Playlists, 3 = Sources
   String? _selectedAlbumName;
@@ -92,12 +109,24 @@ class _HomeScreenState extends State<HomeScreen> with WidgetsBindingObserver {
     if (state == AppLifecycleState.paused ||
         state == AppLifecycleState.inactive ||
         state == AppLifecycleState.detached) {
-      _saveState();
+      _saveGuard.saveNow();
     }
   }
 
   Future<void> _initializeApp() async {
-    final saved = await _storage.load();
+    StorageLoadResult loadResult;
+    try {
+      loadResult = await _storage.loadWithStatus();
+    } catch (e, st) {
+      debugPrint('[HomeScreen._initializeApp] Storage load failed: $e\n$st');
+      loadResult = const StorageLoadResult(
+        state: NovenSavedState.defaults,
+        status: StorageLoadStatus.notFound,
+      );
+    }
+
+    final saved = loadResult.state;
+    _legacyLibraryMigrated = saved.legacyLibraryMigrated;
 
     _engine.applyAudioSettings(volume: saved.volume, isMuted: saved.isMuted);
     _localSource.isEnabled = saved.sourceEnabled['local'] ?? true;
@@ -111,16 +140,33 @@ class _HomeScreenState extends State<HomeScreen> with WidgetsBindingObserver {
       });
     }
 
+    var shouldPersistAfterInit = false;
+    try {
+      await _libraryDb.open();
+      await _localSource.loadFromDatabase();
+
+      if (!_legacyLibraryMigrated &&
+          (saved.localFolders.isNotEmpty || saved.localFiles.isNotEmpty)) {
+        await _localSource.migrateLegacyData(
+          folders: saved.localFolders,
+          files: saved.localFiles,
+        );
+        _legacyLibraryMigrated = true;
+        shouldPersistAfterInit = true;
+      } else if (!_legacyLibraryMigrated && saved.schemaVersion < 2) {
+        _legacyLibraryMigrated = true;
+        shouldPersistAfterInit = true;
+      }
+    } catch (e, st) {
+      debugPrint('[HomeScreen._initializeApp] Library DB init failed: $e\n$st');
+    }
+
+    _onlineSource.restoreCustomStreams(saved.customStreams);
+    await _refreshSources();
+
     try {
       await _engine.init();
     } catch (_) {}
-
-    await _localSource.restoreFromSaved(
-      folders: saved.localFolders,
-      files: saved.localFiles,
-    );
-    _onlineSource.restoreCustomStreams(saved.customStreams);
-    await _refreshSources();
 
     if (saved.lastTrackId != null && mounted) {
       Track? matched;
@@ -140,8 +186,9 @@ class _HomeScreenState extends State<HomeScreen> with WidgetsBindingObserver {
       }
       if (matched != null) {
         final resolved = _withResolvedLyrics(matched);
-        final resumeQueue = _allTracks.isNotEmpty
-            ? _dedupeTracks(_allTracks)
+        final availableQueue = _allTracks.where((t) => t.isAvailable).toList();
+        final resumeQueue = availableQueue.isNotEmpty
+            ? _dedupeTracks(availableQueue)
             : [resolved];
         setState(() {
           _currentTrack = resolved;
@@ -156,16 +203,69 @@ class _HomeScreenState extends State<HomeScreen> with WidgetsBindingObserver {
         _ensureLyricsForTrack(resolved);
       }
     }
+
+    if (!mounted) return;
+    _saveGuard.markReady();
+
+    if (loadResult.status == StorageLoadStatus.corrupted) {
+      _showStatusSnack(
+        'File pengaturan korup diamankan ke .corrupt — pengaturan aman tidak ditimpa.',
+      );
+    } else if (loadResult.status == StorageLoadStatus.recoveredFromBackup) {
+      _showStatusSnack('Pengaturan dipulihkan dari file backup (.bak).');
+      await _saveGuard.saveNow();
+    } else if (loadResult.status == StorageLoadStatus.migrated ||
+        shouldPersistAfterInit) {
+      await _saveGuard.saveNow();
+    }
+
+    _playbackPersistTimer?.cancel();
+    _playbackPersistTimer = Timer.periodic(const Duration(seconds: 5), (_) {
+      if (_engine.isPlaying && _currentTrack != null) {
+        _scheduleSaveState();
+      }
+    });
+
+    unawaited(_runBackgroundRescan());
   }
 
-  Future<void> _saveState() {
+  Future<void> _runBackgroundRescan() async {
+    if (_isBackgroundRescanning || !mounted) return;
+    _isBackgroundRescanning = true;
+    try {
+      await _localSource.rescanInBackground();
+      await _refreshSources();
+      if (!mounted) return;
+      _syncActiveTrackSnapshots();
+    } catch (e, st) {
+      debugPrint('[HomeScreen._runBackgroundRescan] Rescan error: $e\n$st');
+    } finally {
+      _isBackgroundRescanning = false;
+    }
+  }
+
+  void _syncActiveTrackSnapshots() {
+    final byId = {for (final t in _allKnownTracks) t.id: t};
+    setState(() {
+      if (_currentTrack != null && byId.containsKey(_currentTrack!.id)) {
+        _currentTrack = _withResolvedLyrics(byId[_currentTrack!.id]!);
+      }
+      _playQueue = _playQueue
+          .map((t) => byId.containsKey(t.id) ? _withResolvedLyrics(byId[t.id]!) : t)
+          .toList();
+    });
+  }
+
+  Future<void> _persistState() {
     final posMs = _engine.hasLoadedSource
         ? _engine.position.inMilliseconds
         : _pendingResumePositionMs;
     return _storage.save(
       NovenSavedState(
-        localFolders: _localSource.savedFolders,
-        localFiles: _localSource.savedFiles,
+        schemaVersion: NovenSavedState.currentSchemaVersion,
+        legacyLibraryMigrated: _legacyLibraryMigrated,
+        localFolders: _localSource.watchedFolders,
+        localFiles: const [],
         customStreams: _onlineSource.customStreams,
         sourceEnabled: {
           for (final s in _sources) s.id: s.isEnabled,
@@ -178,12 +278,31 @@ class _HomeScreenState extends State<HomeScreen> with WidgetsBindingObserver {
         lastTrackId: _currentTrack?.id,
         lastPositionMs: posMs < 0 ? 0 : posMs,
       ),
+      allowOverwriteCorrupt: _allowOverwriteAfterCorrupt,
     );
+  }
+
+  void _scheduleSaveState({bool userAction = false}) {
+    if (userAction) {
+      _allowOverwriteAfterCorrupt = true;
+    }
+    _saveGuard.scheduleSave();
+  }
+
+  Future<void> _saveStateNow({bool userAction = false}) {
+    if (userAction) {
+      _allowOverwriteAfterCorrupt = true;
+    }
+    return _saveGuard.saveNow();
   }
 
   @override
   void dispose() {
     WidgetsBinding.instance.removeObserver(this);
+    _playbackPersistTimer?.cancel();
+    _saveGuard.flushIfPending();
+    _saveGuard.dispose();
+    _libraryDb.close();
     _searchController.dispose();
     _engine.dispose();
     super.dispose();
@@ -251,7 +370,7 @@ class _HomeScreenState extends State<HomeScreen> with WidgetsBindingObserver {
       final tracks = await source.fetchTracks();
       allKnown.addAll(tracks);
       if (source.isEnabled) {
-        aggregated.addAll(tracks);
+        aggregated.addAll(tracks.where((t) => t.isAvailable));
       }
     }
     final locals = await _localSource.fetchTracks();
@@ -268,39 +387,71 @@ class _HomeScreenState extends State<HomeScreen> with WidgetsBindingObserver {
     final added = await _localSource.pickFiles();
     if (added > 0) {
       await _refreshSources();
-      await _saveState();
+      await _saveStateNow(userAction: true);
     }
   }
 
   Future<void> _importFolder() async {
-    final prevFolders = _localSource.savedFolders.length;
+    final prevFolders = _localSource.watchedFolders.length;
     final added = await _localSource.pickFolder();
-    if (added > 0 || _localSource.savedFolders.length > prevFolders) {
+    if (added > 0 || _localSource.watchedFolders.length > prevFolders) {
       await _refreshSources();
-      await _saveState();
+      await _saveStateNow(userAction: true);
     }
   }
 
   Future<void> _rescanLocalFolders() async {
-    final total = await _localSource.rescanAll();
+    final result = await _localSource.rescanInBackground();
     await _refreshSources();
-    await _saveState();
+    _syncActiveTrackSnapshots();
+    await _saveStateNow(userAction: true);
     if (!mounted) return;
-    ScaffoldMessenger.of(context).showSnackBar(
-      SnackBar(
-        backgroundColor: NovenColors.surface,
-        content: Text(
-          'Library lokal diperbarui ($total lagu).',
-          style: const TextStyle(color: Colors.white),
-        ),
-      ),
-    );
+    final suffix = result.unavailable > 0
+        ? ' (${result.unavailable} tidak tersedia)'
+        : '';
+    _showStatusSnack('Library lokal diperbarui: ${result.total} lagu$suffix.');
   }
 
   Future<void> _removeLocalFolder(String folderPath) async {
     await _localSource.removeFolder(folderPath);
     await _refreshSources();
-    await _saveState();
+    await _saveStateNow(userAction: true);
+  }
+
+  Future<void> _locateTrack(Track track) async {
+    final updated = await _localSource.relocateTrack(track.id);
+    if (updated == null) return;
+
+    await _refreshSources();
+    _syncActiveTrackSnapshots();
+    await _saveStateNow(userAction: true);
+    if (!mounted) return;
+    _showStatusSnack('"${updated.title}" berhasil dihubungkan ulang.');
+  }
+
+  Future<void> _removeTrackFromLibrary(Track track) async {
+    await _localSource.removeTrack(track.id);
+    if (!mounted) return;
+    setState(() {
+      _playQueue = _playQueue.where((t) => t.id != track.id).toList();
+      _playlists = _playlists
+          .map(
+            (p) => p.trackIds.contains(track.id)
+                ? p.copyWith(
+                    trackIds: p.trackIds.where((id) => id != track.id).toList(),
+                  )
+                : p,
+          )
+          .toList();
+      if (_currentTrack?.id == track.id && !_engine.hasLoadedSource) {
+        _currentTrack = null;
+        _pendingResumePositionMs = 0;
+      }
+    });
+    await _refreshSources();
+    await _saveStateNow(userAction: true);
+    if (!mounted) return;
+    _showStatusSnack('"${track.title}" dihapus dari Library.');
   }
 
   Future<void> _playTrack(
@@ -310,6 +461,13 @@ class _HomeScreenState extends State<HomeScreen> with WidgetsBindingObserver {
     bool resetShuffleCycle = false,
     Duration? startAt,
   }) async {
+    if (!track.isAvailable) {
+      _showStatusSnack(
+        'File "${track.title}" tidak tersedia. Pilih "Locate ulang" di menu lagu.',
+      );
+      return;
+    }
+
     final resolved = _withResolvedLyrics(track);
     if (recordHistory &&
         _currentTrack != null &&
@@ -332,12 +490,18 @@ class _HomeScreenState extends State<HomeScreen> with WidgetsBindingObserver {
       _isLoadingTrack = true;
     });
 
-    _saveState();
+    _saveStateNow(userAction: true);
 
     try {
       await _engine.playTrack(resolved, startPosition: startAt);
       _ensureLyricsForTrack(resolved);
     } catch (_) {
+      if (resolved.sourceType == TrackSourceType.local &&
+          !File(resolved.pathOrUrl).existsSync()) {
+        await _localSource.markTrackUnavailable(resolved.id);
+        await _refreshSources();
+        if (mounted) _syncActiveTrackSnapshots();
+      }
       if (!mounted) return;
       ScaffoldMessenger.of(context).showSnackBar(
         SnackBar(
@@ -356,7 +520,9 @@ class _HomeScreenState extends State<HomeScreen> with WidgetsBindingObserver {
   void _togglePlayPause() {
     if (_isLoadingTrack) return;
     if (_currentTrack == null && _allTracks.isNotEmpty) {
-      _playTrack(_allTracks.first, _allTracks, resetShuffleCycle: true);
+      final firstAvailable = _allTracks.where((t) => t.isAvailable).toList();
+      if (firstAvailable.isEmpty) return;
+      _playTrack(firstAvailable.first, firstAvailable, resetShuffleCycle: true);
       return;
     }
     if (_currentTrack != null && !_engine.hasLoadedSource) {
@@ -371,7 +537,7 @@ class _HomeScreenState extends State<HomeScreen> with WidgetsBindingObserver {
       return;
     }
     _engine.togglePause();
-    _saveState();
+    _scheduleSaveState(userAction: true);
   }
 
   Future<void> _onTrackComplete() async {
@@ -471,17 +637,17 @@ class _HomeScreenState extends State<HomeScreen> with WidgetsBindingObserver {
         _shufflePlayedIds.add(_currentTrack!.id);
       }
     });
-    _saveState();
+    _scheduleSaveState(userAction: true);
   }
 
   void _cycleRepeatMode() {
     setState(() => _repeatMode = _repeatMode.next);
-    _saveState();
+    _scheduleSaveState(userAction: true);
   }
 
   void _toggleMute() {
     _engine.toggleMute();
-    _saveState();
+    _scheduleSaveState(userAction: true);
   }
 
   Future<void> _showAddUrlDialog() async {
@@ -498,7 +664,7 @@ class _HomeScreenState extends State<HomeScreen> with WidgetsBindingObserver {
       );
       if (added) {
         await _refreshSources();
-        await _saveState();
+        await _saveStateNow(userAction: true);
       }
     }
   }
@@ -506,7 +672,7 @@ class _HomeScreenState extends State<HomeScreen> with WidgetsBindingObserver {
   Future<void> _removeCustomUrl(String url) async {
     _onlineSource.removeCustomUrl(url);
     await _refreshSources();
-    await _saveState();
+    await _saveStateNow(userAction: true);
   }
 
   void _showStatusSnack(String message) {
@@ -521,11 +687,12 @@ class _HomeScreenState extends State<HomeScreen> with WidgetsBindingObserver {
   }
 
   void _shuffleTracks(List<Track> tracks) {
-    if (tracks.isEmpty) return;
+    final available = tracks.where((t) => t.isAvailable).toList();
+    if (available.isEmpty) return;
     setState(() => _shuffle = true);
-    final picked = tracks[_random.nextInt(tracks.length)];
-    _playTrack(picked, tracks, resetShuffleCycle: true);
-    _saveState();
+    final picked = available[_random.nextInt(available.length)];
+    _playTrack(picked, available, resetShuffleCycle: true);
+    _scheduleSaveState(userAction: true);
   }
 
   void _reorderQueue(int oldIndex, int newIndex) {
@@ -650,7 +817,7 @@ class _HomeScreenState extends State<HomeScreen> with WidgetsBindingObserver {
       createdAt: DateTime.now(),
     );
     setState(() => _playlists = [..._playlists, playlist]);
-    _saveState();
+    _saveStateNow(userAction: true);
     _showStatusSnack('Playlist "$trimmed" dibuat.');
   }
 
@@ -662,14 +829,14 @@ class _HomeScreenState extends State<HomeScreen> with WidgetsBindingObserver {
           .map((p) => p.id == playlistId ? p.copyWith(name: trimmed) : p)
           .toList();
     });
-    _saveState();
+    _saveStateNow(userAction: true);
   }
 
   void _deletePlaylist(String playlistId) {
     setState(() {
       _playlists = _playlists.where((p) => p.id != playlistId).toList();
     });
-    _saveState();
+    _saveStateNow(userAction: true);
   }
 
   void _addTracksToPlaylist(String playlistId, List<String> trackIds) {
@@ -684,7 +851,7 @@ class _HomeScreenState extends State<HomeScreen> with WidgetsBindingObserver {
         return p.copyWith(trackIds: updated);
       }).toList();
     });
-    _saveState();
+    _saveStateNow(userAction: true);
   }
 
   void _removeTrackFromPlaylist(String playlistId, int rawIndex) {
@@ -696,7 +863,7 @@ class _HomeScreenState extends State<HomeScreen> with WidgetsBindingObserver {
         return p.copyWith(trackIds: updated);
       }).toList();
     });
-    _saveState();
+    _saveStateNow(userAction: true);
   }
 
   void _reorderPlaylistTrack(String playlistId, int oldIndex, int newIndex) {
@@ -714,7 +881,7 @@ class _HomeScreenState extends State<HomeScreen> with WidgetsBindingObserver {
         return p.copyWith(trackIds: [...visible, ...missing]);
       }).toList();
     });
-    _saveState();
+    _saveStateNow(userAction: true);
   }
 
   Future<void> _promptAddTrackToPlaylist(Track track) {
@@ -1203,7 +1370,8 @@ class _HomeScreenState extends State<HomeScreen> with WidgetsBindingObserver {
         child: Stack(
           children: [
             // Artwork kanan pudar halus ke kiri
-            if (track?.coverBytes != null || track?.coverUrl != null)
+            if ((track?.coverPath != null && track!.coverPath!.isNotEmpty) ||
+                (track?.coverUrl != null && track!.coverUrl!.isNotEmpty))
               Positioned(
                 right: 0,
                 top: 0,
@@ -1218,8 +1386,13 @@ class _HomeScreenState extends State<HomeScreen> with WidgetsBindingObserver {
                   blendMode: BlendMode.dstIn,
                   child: Opacity(
                     opacity: 0.55,
-                    child: track!.coverBytes != null
-                        ? Image.memory(track.coverBytes!, fit: BoxFit.cover)
+                    child:
+                        track.coverPath != null && track.coverPath!.isNotEmpty
+                        ? Image.file(
+                            File(track.coverPath!),
+                            fit: BoxFit.cover,
+                            errorBuilder: (_, _, _) => const SizedBox.shrink(),
+                          )
                         : Image.network(
                             track.coverUrl!,
                             fit: BoxFit.cover,
@@ -1568,15 +1741,15 @@ class _HomeScreenState extends State<HomeScreen> with WidgetsBindingObserver {
             duration: _engine.duration,
             position: target,
           );
-          _saveState();
+          _scheduleSaveState(userAction: true);
         } else {
           _engine.seek(target);
-          _saveState();
+          _scheduleSaveState(userAction: true);
         }
         setState(() => _isSeeking = false);
       },
       onVolumeChange: _engine.setVolume,
-      onVolumeChangeEnd: (_) => _saveState(),
+      onVolumeChangeEnd: (_) => _scheduleSaveState(userAction: true),
       onToggleMute: _toggleMute,
       onOpenQueue: _openQueueSheet,
       queueCount: _playQueue.length,
@@ -1661,129 +1834,183 @@ class _HomeScreenState extends State<HomeScreen> with WidgetsBindingObserver {
                       final track = _localTracks[index];
                       final isCurrent = _currentTrack?.id == track.id;
 
-                      return InkWell(
-                        borderRadius: BorderRadius.circular(14),
-                        onTap: () => _playTrack(
-                          track,
-                          _localTracks,
-                          resetShuffleCycle: true,
-                        ),
-                        child: Container(
-                          padding: const EdgeInsets.symmetric(
-                            horizontal: 12,
-                            vertical: 10,
+                      return Opacity(
+                        opacity: track.isAvailable ? 1.0 : 0.62,
+                        child: InkWell(
+                          borderRadius: BorderRadius.circular(14),
+                          onTap: () => _playTrack(
+                            track,
+                            _localTracks.where((t) => t.isAvailable).toList(),
+                            resetShuffleCycle: true,
                           ),
-                          decoration: BoxDecoration(
-                            color: isCurrent
-                                ? NovenColors.accent.withValues(alpha: 0.22)
-                                : NovenColors.surface,
-                            borderRadius: BorderRadius.circular(14),
-                            border: Border.all(
-                              color: isCurrent
-                                  ? NovenColors.accentLight.withValues(
-                                      alpha: 0.7,
-                                    )
-                                  : Colors.white.withValues(alpha: 0.05),
+                          child: Container(
+                            padding: const EdgeInsets.symmetric(
+                              horizontal: 12,
+                              vertical: 10,
                             ),
-                          ),
-                          child: Row(
-                            children: [
-                              CoverArt(track: track, size: 44, radius: 10),
-                              const SizedBox(width: 12),
-                              Expanded(
-                                child: Column(
-                                  crossAxisAlignment: CrossAxisAlignment.start,
-                                  children: [
-                                    Text(
-                                      track.title,
-                                      style: const TextStyle(
-                                        fontWeight: FontWeight.w600,
-                                        color: Colors.white,
-                                      ),
-                                      maxLines: 1,
-                                      overflow: TextOverflow.ellipsis,
-                                    ),
-                                    Text(
-                                      track.album != null
-                                          ? '${track.artist} • ${track.album}'
-                                          : track.artist,
-                                      style: TextStyle(
-                                        fontSize: 12,
-                                        color: NovenColors.silver.withValues(
-                                          alpha: 0.75,
-                                        ),
-                                      ),
-                                      maxLines: 1,
-                                      overflow: TextOverflow.ellipsis,
-                                    ),
-                                  ],
-                                ),
+                            decoration: BoxDecoration(
+                              color: isCurrent
+                                  ? NovenColors.accent.withValues(alpha: 0.22)
+                                  : NovenColors.surface,
+                              borderRadius: BorderRadius.circular(14),
+                              border: Border.all(
+                                color: !track.isAvailable
+                                    ? Colors.amber.withValues(alpha: 0.45)
+                                    : isCurrent
+                                    ? NovenColors.accentLight.withValues(
+                                        alpha: 0.7,
+                                      )
+                                    : Colors.white.withValues(alpha: 0.05),
                               ),
-                              if (track.lyrics != null)
-                                Padding(
-                                  padding: const EdgeInsets.only(right: 10),
-                                  child: Icon(
-                                    Icons.lyrics_rounded,
-                                    size: 16,
-                                    color: NovenColors.accentLight,
+                            ),
+                            child: Row(
+                              children: [
+                                CoverArt(track: track, size: 44, radius: 10),
+                                const SizedBox(width: 12),
+                                Expanded(
+                                  child: Column(
+                                    crossAxisAlignment:
+                                        CrossAxisAlignment.start,
+                                    children: [
+                                      Text(
+                                        track.title,
+                                        style: const TextStyle(
+                                          fontWeight: FontWeight.w600,
+                                          color: Colors.white,
+                                        ),
+                                        maxLines: 1,
+                                        overflow: TextOverflow.ellipsis,
+                                      ),
+                                      Text(
+                                        track.album != null
+                                            ? '${track.artist} • ${track.album}'
+                                            : track.artist,
+                                        style: TextStyle(
+                                          fontSize: 12,
+                                          color: NovenColors.silver.withValues(
+                                            alpha: 0.75,
+                                          ),
+                                        ),
+                                        maxLines: 1,
+                                        overflow: TextOverflow.ellipsis,
+                                      ),
+                                    ],
                                   ),
                                 ),
-                              if (track.duration != null)
-                                Text(
-                                  _formatDuration(track.duration!),
-                                  style: TextStyle(
-                                    fontSize: 12,
+                                if (!track.isAvailable)
+                                  Container(
+                                    margin: const EdgeInsets.only(right: 8),
+                                    padding: const EdgeInsets.symmetric(
+                                      horizontal: 8,
+                                      vertical: 3,
+                                    ),
+                                    decoration: BoxDecoration(
+                                      color: Colors.amber.withValues(
+                                        alpha: 0.16,
+                                      ),
+                                      borderRadius: BorderRadius.circular(10),
+                                      border: Border.all(
+                                        color: Colors.amber.withValues(
+                                          alpha: 0.45,
+                                        ),
+                                      ),
+                                    ),
+                                    child: const Text(
+                                      'Tidak tersedia',
+                                      style: TextStyle(
+                                        fontSize: 11,
+                                        fontWeight: FontWeight.w600,
+                                        color: Colors.amberAccent,
+                                      ),
+                                    ),
+                                  ),
+                                if (track.isAvailable && track.lyrics != null)
+                                  Padding(
+                                    padding: const EdgeInsets.only(right: 10),
+                                    child: Icon(
+                                      Icons.lyrics_rounded,
+                                      size: 16,
+                                      color: NovenColors.accentLight,
+                                    ),
+                                  ),
+                                if (track.duration != null)
+                                  Text(
+                                    _formatDuration(track.duration!),
+                                    style: TextStyle(
+                                      fontSize: 12,
+                                      color: NovenColors.silver.withValues(
+                                        alpha: 0.75,
+                                      ),
+                                    ),
+                                  ),
+                                PopupMenuButton<String>(
+                                  tooltip: 'Opsi Lagu',
+                                  icon: Icon(
+                                    Icons.more_vert_rounded,
+                                    size: 18,
                                     color: NovenColors.silver.withValues(
                                       alpha: 0.75,
                                     ),
                                   ),
+                                  color: NovenColors.surface,
+                                  shape: RoundedRectangleBorder(
+                                    borderRadius: BorderRadius.circular(12),
+                                    side: BorderSide(
+                                      color: Colors.white.withValues(
+                                        alpha: 0.08,
+                                      ),
+                                    ),
+                                  ),
+                                  onSelected: (value) {
+                                    WidgetsBinding.instance
+                                        .addPostFrameCallback((_) {
+                                          if (!mounted) return;
+                                          switch (value) {
+                                            case 'locate':
+                                              _locateTrack(track);
+                                            case 'next':
+                                              _insertPlayNext(track);
+                                            case 'queue':
+                                              _addToQueue(track);
+                                            case 'playlist':
+                                              _promptAddTrackToPlaylist(track);
+                                            case 'remove':
+                                              _removeTrackFromLibrary(track);
+                                          }
+                                        });
+                                  },
+                                  itemBuilder: (_) => track.isAvailable
+                                      ? const [
+                                          PopupMenuItem(
+                                            value: 'next',
+                                            child: Text('Play Next'),
+                                          ),
+                                          PopupMenuItem(
+                                            value: 'queue',
+                                            child: Text('Add to Queue'),
+                                          ),
+                                          PopupMenuItem(
+                                            value: 'playlist',
+                                            child: Text('Add to Playlist'),
+                                          ),
+                                          PopupMenuItem(
+                                            value: 'remove',
+                                            child: Text('Hapus dari Library'),
+                                          ),
+                                        ]
+                                      : const [
+                                          PopupMenuItem(
+                                            value: 'locate',
+                                            child: Text('Locate ulang'),
+                                          ),
+                                          PopupMenuItem(
+                                            value: 'remove',
+                                            child: Text('Hapus dari Library'),
+                                          ),
+                                        ],
                                 ),
-                              PopupMenuButton<String>(
-                                tooltip: 'Opsi Lagu',
-                                icon: Icon(
-                                  Icons.more_vert_rounded,
-                                  size: 18,
-                                  color: NovenColors.silver.withValues(
-                                    alpha: 0.75,
-                                  ),
-                                ),
-                                color: NovenColors.surface,
-                                shape: RoundedRectangleBorder(
-                                  borderRadius: BorderRadius.circular(12),
-                                  side: BorderSide(
-                                    color: Colors.white.withValues(alpha: 0.08),
-                                  ),
-                                ),
-                                onSelected: (value) {
-                                  WidgetsBinding.instance.addPostFrameCallback((
-                                    _,
-                                  ) {
-                                    switch (value) {
-                                      case 'next':
-                                        _insertPlayNext(track);
-                                      case 'queue':
-                                        _addToQueue(track);
-                                      case 'playlist':
-                                        _promptAddTrackToPlaylist(track);
-                                    }
-                                  });
-                                },
-                                itemBuilder: (_) => const [
-                                  PopupMenuItem(
-                                    value: 'next',
-                                    child: Text('Play Next'),
-                                  ),
-                                  PopupMenuItem(
-                                    value: 'queue',
-                                    child: Text('Add to Queue'),
-                                  ),
-                                  PopupMenuItem(
-                                    value: 'playlist',
-                                    child: Text('Add to Playlist'),
-                                  ),
-                                ],
-                              ),
-                            ],
+                              ],
+                            ),
                           ),
                         ),
                       );
@@ -1823,6 +2050,8 @@ class _HomeScreenState extends State<HomeScreen> with WidgetsBindingObserver {
               onPlayTrack: (track, queue) =>
                   _playTrack(track, queue, resetShuffleCycle: true),
               onShufflePlaylist: _shuffleTracks,
+              onLocateTrack: _locateTrack,
+              onRemoveTrackFromLibrary: _removeTrackFromLibrary,
             ),
           ),
           const SizedBox(height: 12),
@@ -1922,7 +2151,7 @@ class _HomeScreenState extends State<HomeScreen> with WidgetsBindingObserver {
                             onChanged: (val) async {
                               source.isEnabled = val;
                               await _refreshSources();
-                              await _saveState();
+                              await _saveStateNow(userAction: true);
                             },
                           ),
                         ],
@@ -1949,8 +2178,8 @@ class _HomeScreenState extends State<HomeScreen> with WidgetsBindingObserver {
                                   ),
                                   label: const Text('Tambah File'),
                                 ),
-                                if (_localSource.savedFolders.isNotEmpty ||
-                                    _localSource.savedFiles.isNotEmpty)
+                                if (_localSource.watchedFolders.isNotEmpty ||
+                                    _localTracks.isNotEmpty)
                                   OutlinedButton.icon(
                                     onPressed: _rescanLocalFolders,
                                     icon: const Icon(
@@ -1972,14 +2201,14 @@ class _HomeScreenState extends State<HomeScreen> with WidgetsBindingObserver {
                               ],
                       ),
                       if (isLocal &&
-                          (_localSource.savedFolders.isNotEmpty ||
-                              _localSource.savedFiles.isNotEmpty)) ...[
+                          (_localSource.watchedFolders.isNotEmpty ||
+                              _localTracks.isNotEmpty)) ...[
                         const SizedBox(height: 12),
                         Wrap(
                           spacing: 8,
                           runSpacing: 8,
                           children: [
-                            for (final folder in _localSource.savedFolders)
+                            for (final folder in _localSource.watchedFolders)
                               Tooltip(
                                 message: folder,
                                 child: InputChip(
@@ -2003,19 +2232,26 @@ class _HomeScreenState extends State<HomeScreen> with WidgetsBindingObserver {
                                   onDeleted: () => _removeLocalFolder(folder),
                                 ),
                               ),
-                            if (_localSource.savedFiles.isNotEmpty)
+                            if (_localTracks.isNotEmpty)
                               Chip(
                                 backgroundColor: NovenColors.bg,
                                 side: BorderSide(
                                   color: Colors.white.withValues(alpha: 0.08),
                                 ),
                                 avatar: const Icon(
-                                  Icons.audio_file_rounded,
+                                  Icons.storage_rounded,
                                   size: 15,
                                   color: NovenColors.silver,
                                 ),
                                 label: Text(
-                                  '${_localSource.savedFiles.length} file individual',
+                                  () {
+                                    final missingCount = _localTracks
+                                        .where((t) => !t.isAvailable)
+                                        .length;
+                                    return missingCount > 0
+                                        ? '${_localTracks.length} lagu di DB ($missingCount tidak tersedia)'
+                                        : '${_localTracks.length} lagu tersimpan di DB';
+                                  }(),
                                   style: const TextStyle(
                                     fontSize: 12,
                                     color: NovenColors.silver,

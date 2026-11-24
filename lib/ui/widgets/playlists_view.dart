@@ -38,6 +38,8 @@ class PlaylistsView extends StatefulWidget {
   onReorderPlaylistTrack;
   final void Function(Track track, List<Track> queue) onPlayTrack;
   final ValueChanged<List<Track>> onShufflePlaylist;
+  final ValueChanged<Track>? onLocateTrack;
+  final ValueChanged<Track>? onRemoveTrackFromLibrary;
 
   const PlaylistsView({
     super.key,
@@ -53,6 +55,8 @@ class PlaylistsView extends StatefulWidget {
     required this.onReorderPlaylistTrack,
     required this.onPlayTrack,
     required this.onShufflePlaylist,
+    this.onLocateTrack,
+    this.onRemoveTrackFromLibrary,
   });
 
   @override
@@ -367,6 +371,8 @@ class _PlaylistsViewState extends State<PlaylistsView> {
       }
     }
     final resolvedTracks = entries.map((e) => e.track).toList();
+    final playableTracks = resolvedTracks.where((t) => t.isAvailable).toList();
+    final unavailableCount = resolvedTracks.length - playableTracks.length;
     final coverTrack = resolvedTracks.isEmpty ? null : resolvedTracks.first;
 
     return Container(
@@ -412,7 +418,9 @@ class _PlaylistsViewState extends State<PlaylistsView> {
                     ),
                     const SizedBox(height: 4),
                     Text(
-                      '${resolvedTracks.length} lagu tersedia',
+                      unavailableCount > 0
+                          ? '${playableTracks.length} tersedia • $unavailableCount tidak tersedia'
+                          : '${resolvedTracks.length} lagu tersedia',
                       style: TextStyle(
                         fontSize: 12.5,
                         color: NovenColors.silver.withValues(alpha: 0.78),
@@ -424,11 +432,11 @@ class _PlaylistsViewState extends State<PlaylistsView> {
                       runSpacing: 8,
                       children: [
                         FilledButton.icon(
-                          onPressed: resolvedTracks.isEmpty
+                          onPressed: playableTracks.isEmpty
                               ? null
                               : () => widget.onPlayTrack(
-                                  resolvedTracks.first,
-                                  resolvedTracks,
+                                  playableTracks.first,
+                                  playableTracks,
                                 ),
                           style: FilledButton.styleFrom(
                             backgroundColor: NovenColors.accent,
@@ -438,9 +446,9 @@ class _PlaylistsViewState extends State<PlaylistsView> {
                           label: const Text('Play'),
                         ),
                         OutlinedButton.icon(
-                          onPressed: resolvedTracks.isEmpty
+                          onPressed: playableTracks.isEmpty
                               ? null
-                              : () => widget.onShufflePlaylist(resolvedTracks),
+                              : () => widget.onShufflePlaylist(playableTracks),
                           icon: const Icon(Icons.shuffle_rounded, size: 17),
                           label: const Text('Shuffle'),
                         ),
@@ -499,118 +507,148 @@ class _PlaylistsViewState extends State<PlaylistsView> {
                         return Padding(
                           key: ValueKey('pl_${playlist.id}_${track.id}_$index'),
                           padding: const EdgeInsets.only(bottom: 8),
-                          child: InkWell(
-                            borderRadius: BorderRadius.circular(14),
-                            onTap: () =>
-                                widget.onPlayTrack(track, resolvedTracks),
-                            child: Container(
-                              padding: const EdgeInsets.symmetric(
-                                horizontal: 10,
-                                vertical: 8,
+                          child: Opacity(
+                            opacity: track.isAvailable ? 1.0 : 0.62,
+                            child: InkWell(
+                              borderRadius: BorderRadius.circular(14),
+                              onTap: () => widget.onPlayTrack(
+                                track,
+                                playableTracks.isNotEmpty
+                                    ? playableTracks
+                                    : resolvedTracks,
                               ),
-                              decoration: BoxDecoration(
-                                color: isCurrent
-                                    ? NovenColors.accent.withValues(alpha: 0.24)
-                                    : NovenColors.surface,
-                                borderRadius: BorderRadius.circular(14),
-                                border: Border.all(
-                                  color: isCurrent
-                                      ? NovenColors.accentLight.withValues(
-                                          alpha: 0.7,
-                                        )
-                                      : Colors.white.withValues(alpha: 0.05),
+                              child: Container(
+                                padding: const EdgeInsets.symmetric(
+                                  horizontal: 10,
+                                  vertical: 8,
                                 ),
-                              ),
-                              child: Row(
-                                children: [
-                                  ReorderableDragStartListener(
-                                    index: index,
-                                    child: Padding(
-                                      padding: const EdgeInsets.symmetric(
-                                        horizontal: 4,
-                                        vertical: 6,
-                                      ),
-                                      child: Icon(
-                                        Icons.drag_handle_rounded,
-                                        size: 18,
-                                        color: NovenColors.silver.withValues(
-                                          alpha: 0.55,
-                                        ),
-                                      ),
-                                    ),
+                                decoration: BoxDecoration(
+                                  color: isCurrent
+                                      ? NovenColors.accent.withValues(
+                                          alpha: 0.24,
+                                        )
+                                      : NovenColors.surface,
+                                  borderRadius: BorderRadius.circular(14),
+                                  border: Border.all(
+                                    color: !track.isAvailable
+                                        ? Colors.amber.withValues(alpha: 0.45)
+                                        : isCurrent
+                                        ? NovenColors.accentLight.withValues(
+                                            alpha: 0.7,
+                                          )
+                                        : Colors.white.withValues(alpha: 0.05),
                                   ),
-                                  const SizedBox(width: 6),
-                                  CoverArt(track: track, size: 40, radius: 10),
-                                  const SizedBox(width: 10),
-                                  Expanded(
-                                    child: Column(
-                                      crossAxisAlignment:
-                                          CrossAxisAlignment.start,
-                                      children: [
-                                        Text(
-                                          track.title,
-                                          style: TextStyle(
-                                            fontSize: 13.5,
-                                            fontWeight: isCurrent
-                                                ? FontWeight.bold
-                                                : FontWeight.w600,
-                                            color: Colors.white,
+                                ),
+                                child: Row(
+                                  children: [
+                                    ReorderableDragStartListener(
+                                      index: index,
+                                      child: Padding(
+                                        padding: const EdgeInsets.symmetric(
+                                          horizontal: 4,
+                                          vertical: 6,
+                                        ),
+                                        child: Icon(
+                                          Icons.drag_handle_rounded,
+                                          size: 18,
+                                          color: NovenColors.silver.withValues(
+                                            alpha: 0.55,
                                           ),
-                                          maxLines: 1,
-                                          overflow: TextOverflow.ellipsis,
                                         ),
-                                        Text(
-                                          track.artist,
-                                          style: TextStyle(
-                                            fontSize: 11.5,
-                                            color: NovenColors.silver
-                                                .withValues(alpha: 0.75),
+                                      ),
+                                    ),
+                                    const SizedBox(width: 6),
+                                    CoverArt(track: track, size: 40, radius: 10),
+                                    const SizedBox(width: 10),
+                                    Expanded(
+                                      child: Column(
+                                        crossAxisAlignment:
+                                            CrossAxisAlignment.start,
+                                        children: [
+                                          Text(
+                                            track.title,
+                                            style: TextStyle(
+                                              fontSize: 13.5,
+                                              fontWeight: isCurrent
+                                                  ? FontWeight.bold
+                                                  : FontWeight.w600,
+                                              color: Colors.white,
+                                            ),
+                                            maxLines: 1,
+                                            overflow: TextOverflow.ellipsis,
                                           ),
-                                          maxLines: 1,
-                                          overflow: TextOverflow.ellipsis,
-                                        ),
-                                      ],
+                                          Text(
+                                            track.isAvailable
+                                                ? track.artist
+                                                : '${track.artist} • Tidak tersedia',
+                                            style: TextStyle(
+                                              fontSize: 11.5,
+                                              color: track.isAvailable
+                                                  ? NovenColors.silver
+                                                        .withValues(alpha: 0.75)
+                                                  : Colors.amberAccent
+                                                        .withValues(alpha: 0.9),
+                                            ),
+                                            maxLines: 1,
+                                            overflow: TextOverflow.ellipsis,
+                                          ),
+                                        ],
+                                      ),
                                     ),
-                                  ),
-                                  const SizedBox(width: 8),
-                                  Icon(
-                                    isOnline
-                                        ? Icons.cloud_rounded
-                                        : Icons.laptop_rounded,
-                                    size: 14,
-                                    color: NovenColors.silver.withValues(
-                                      alpha: 0.65,
-                                    ),
-                                  ),
-                                  if (track.duration != null) ...[
                                     const SizedBox(width: 8),
-                                    Text(
-                                      _formatDuration(track.duration!),
-                                      style: TextStyle(
-                                        fontSize: 11.5,
+                                    if (!track.isAvailable &&
+                                        widget.onLocateTrack != null)
+                                      IconButton(
+                                        visualDensity: VisualDensity.compact,
+                                        tooltip: 'Locate ulang file',
+                                        icon: const Icon(
+                                          Icons.folder_open_rounded,
+                                          size: 17,
+                                          color: Colors.amberAccent,
+                                        ),
+                                        onPressed: () =>
+                                            widget.onLocateTrack!(track),
+                                      )
+                                    else
+                                      Icon(
+                                        isOnline
+                                            ? Icons.cloud_rounded
+                                            : Icons.laptop_rounded,
+                                        size: 14,
                                         color: NovenColors.silver.withValues(
-                                          alpha: 0.75,
+                                          alpha: 0.65,
                                         ),
                                       ),
+                                    if (track.duration != null) ...[
+                                      const SizedBox(width: 8),
+                                      Text(
+                                        _formatDuration(track.duration!),
+                                        style: TextStyle(
+                                          fontSize: 11.5,
+                                          color: NovenColors.silver.withValues(
+                                            alpha: 0.75,
+                                          ),
+                                        ),
+                                      ),
+                                    ],
+                                    IconButton(
+                                      visualDensity: VisualDensity.compact,
+                                      tooltip: 'Hapus dari Playlist',
+                                      icon: Icon(
+                                        Icons.close_rounded,
+                                        size: 17,
+                                        color: NovenColors.silver.withValues(
+                                          alpha: 0.65,
+                                        ),
+                                      ),
+                                      onPressed: () =>
+                                          widget.onRemoveTrackFromPlaylist(
+                                            playlist.id,
+                                            entry.rawIndex,
+                                          ),
                                     ),
                                   ],
-                                  IconButton(
-                                    visualDensity: VisualDensity.compact,
-                                    tooltip: 'Hapus dari Playlist',
-                                    icon: Icon(
-                                      Icons.close_rounded,
-                                      size: 17,
-                                      color: NovenColors.silver.withValues(
-                                        alpha: 0.65,
-                                      ),
-                                    ),
-                                    onPressed: () =>
-                                        widget.onRemoveTrackFromPlaylist(
-                                          playlist.id,
-                                          entry.rawIndex,
-                                        ),
-                                  ),
-                                ],
+                                ),
                               ),
                             ),
                           ),
