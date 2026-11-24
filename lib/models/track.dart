@@ -13,6 +13,8 @@ class Track {
   final String? lyrics;
   final DateTime? addedAt;
   final bool isAvailable;
+  final bool isFavorite;
+  final bool hasCustomMetadata;
 
   const Track({
     required this.id,
@@ -27,12 +29,15 @@ class Track {
     this.lyrics,
     this.addedAt,
     this.isAvailable = true,
+    this.isFavorite = false,
+    this.hasCustomMetadata = false,
   });
 
   Track copyWith({
     String? title,
     String? artist,
     String? album,
+    bool clearAlbum = false,
     String? pathOrUrl,
     String? coverPath,
     bool clearCoverPath = false,
@@ -41,12 +46,14 @@ class Track {
     String? lyrics,
     DateTime? addedAt,
     bool? isAvailable,
+    bool? isFavorite,
+    bool? hasCustomMetadata,
   }) {
     return Track(
       id: id,
       title: title ?? this.title,
       artist: artist ?? this.artist,
-      album: album ?? this.album,
+      album: clearAlbum ? null : (album ?? this.album),
       pathOrUrl: pathOrUrl ?? this.pathOrUrl,
       sourceType: sourceType,
       coverPath: clearCoverPath ? null : (coverPath ?? this.coverPath),
@@ -55,6 +62,8 @@ class Track {
       lyrics: lyrics ?? this.lyrics,
       addedAt: addedAt ?? this.addedAt,
       isAvailable: isAvailable ?? this.isAvailable,
+      isFavorite: isFavorite ?? this.isFavorite,
+      hasCustomMetadata: hasCustomMetadata ?? this.hasCustomMetadata,
     );
   }
 }

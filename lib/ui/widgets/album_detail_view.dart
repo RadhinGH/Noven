@@ -17,6 +17,9 @@ class AlbumDetailView extends StatelessWidget {
   final ValueChanged<Track> onPlayNext;
   final ValueChanged<Track> onAddToQueue;
   final ValueChanged<Track> onAddToPlaylist;
+  final ValueChanged<Track>? onToggleFavorite;
+  final ValueChanged<Track>? onEditTrack;
+  final ValueChanged<Track>? onRemoveTrack;
 
   const AlbumDetailView({
     super.key,
@@ -32,6 +35,9 @@ class AlbumDetailView extends StatelessWidget {
     required this.onPlayNext,
     required this.onAddToQueue,
     required this.onAddToPlaylist,
+    this.onToggleFavorite,
+    this.onEditTrack,
+    this.onRemoveTrack,
   });
 
   String _formatDuration(Duration d) {
@@ -305,6 +311,15 @@ class AlbumDetailView extends StatelessWidget {
                                 ],
                               ),
                             ),
+                            if (track.isFavorite)
+                              const Padding(
+                                padding: EdgeInsets.only(right: 8),
+                                child: Icon(
+                                  Icons.favorite_rounded,
+                                  size: 15,
+                                  color: Colors.pinkAccent,
+                                ),
+                              ),
                             if (track.lyrics != null &&
                                 track.lyrics!.trim().isNotEmpty)
                               const Padding(
@@ -353,22 +368,51 @@ class AlbumDetailView extends StatelessWidget {
                                       onAddToQueue(track);
                                     case 'playlist':
                                       onAddToPlaylist(track);
+                                    case 'favorite':
+                                      onToggleFavorite?.call(track);
+                                    case 'edit':
+                                      onEditTrack?.call(track);
+                                    case 'remove':
+                                      onRemoveTrack?.call(track);
                                   }
                                 });
                               },
-                              itemBuilder: (_) => const [
-                                PopupMenuItem(
+                              itemBuilder: (_) => [
+                                const PopupMenuItem(
                                   value: 'next',
                                   child: Text('Play Next'),
                                 ),
-                                PopupMenuItem(
+                                const PopupMenuItem(
                                   value: 'queue',
                                   child: Text('Add to Queue'),
                                 ),
-                                PopupMenuItem(
+                                const PopupMenuItem(
                                   value: 'playlist',
                                   child: Text('Add to Playlist'),
                                 ),
+                                if (onToggleFavorite != null)
+                                  PopupMenuItem(
+                                    value: 'favorite',
+                                    child: Text(
+                                      track.isFavorite
+                                          ? 'Hapus dari Favorit'
+                                          : 'Favorit',
+                                    ),
+                                  ),
+                                if (track.sourceType ==
+                                        TrackSourceType.local &&
+                                    onEditTrack != null)
+                                  const PopupMenuItem(
+                                    value: 'edit',
+                                    child: Text('Edit Info'),
+                                  ),
+                                if (track.sourceType ==
+                                        TrackSourceType.local &&
+                                    onRemoveTrack != null)
+                                  const PopupMenuItem(
+                                    value: 'remove',
+                                    child: Text('Hapus dari Library'),
+                                  ),
                               ],
                             ),
                           ],

@@ -56,7 +56,7 @@ void main() {
       },
     );
 
-    final pending = <Future<int>>[
+    final pending = <Future<ImportResult>>[
       source.pickFiles(),
       source.pickFiles(),
       source.pickFiles(),
@@ -72,7 +72,7 @@ void main() {
     firstDialog.complete([songFile.path]);
 
     final results = await Future.wait(pending);
-    expect(results, [1, 0, 0, 0, 0]);
+    expect(results.map((r) => r.added).toList(), [1, 0, 0, 0, 0]);
     expect(source.isFilePickerBusy, isFalse);
 
     // Setelah picker ditutup, panggilan berikutnya diperbolehkan kembali
@@ -115,9 +115,9 @@ void main() {
 
     dirDialog.complete(null);
 
-    expect(await folderFuture, 0);
-    expect(await blockedFolder, 0);
-    expect(await blockedFiles, 0);
+    expect((await folderFuture).added, 0);
+    expect((await blockedFolder).added, 0);
+    expect((await blockedFiles).added, 0);
     expect(await blockedRelocate, isNull);
     expect(source.isFilePickerBusy, isFalse);
 
@@ -148,7 +148,8 @@ void main() {
     await expectLater(source.pickFiles(), throwsStateError);
     expect(source.isFilePickerBusy, isFalse);
 
-    await expectLater(source.pickFiles(), completion(0));
+    final res = await source.pickFiles();
+    expect(res.added, 0);
     expect(calls, 2);
 
     await db.close();

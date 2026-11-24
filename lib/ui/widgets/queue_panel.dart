@@ -19,6 +19,9 @@ class QueuePanel extends StatefulWidget {
   final ValueChanged<Track> onPlayNext;
   final ValueChanged<Track> onAddToQueue;
   final ValueChanged<Track> onAddToPlaylist;
+  final ValueChanged<Track>? onToggleFavorite;
+  final ValueChanged<Track>? onEditTrack;
+  final ValueChanged<Track>? onRemoveTrack;
 
   const QueuePanel({
     super.key,
@@ -36,6 +39,9 @@ class QueuePanel extends StatefulWidget {
     required this.onPlayNext,
     required this.onAddToQueue,
     required this.onAddToPlaylist,
+    this.onToggleFavorite,
+    this.onEditTrack,
+    this.onRemoveTrack,
   });
 
   @override
@@ -348,6 +354,15 @@ class _QueuePanelState extends State<QueuePanel> {
                   ),
                 ),
                 const SizedBox(width: 6),
+                if (track.isFavorite)
+                  const Padding(
+                    padding: EdgeInsets.only(right: 6),
+                    child: Icon(
+                      Icons.favorite_rounded,
+                      size: 14,
+                      color: Colors.pinkAccent,
+                    ),
+                  ),
                 if (track.duration != null)
                   Text(
                     _formatDuration(track.duration!),
@@ -378,6 +393,7 @@ class _QueuePanelState extends State<QueuePanel> {
                   ),
                   onSelected: (value) {
                     WidgetsBinding.instance.addPostFrameCallback((_) {
+                      if (!mounted) return;
                       switch (value) {
                         case 'next':
                           widget.onPlayNext(track);
@@ -385,16 +401,45 @@ class _QueuePanelState extends State<QueuePanel> {
                           widget.onAddToQueue(track);
                         case 'playlist':
                           widget.onAddToPlaylist(track);
+                        case 'favorite':
+                          widget.onToggleFavorite?.call(track);
+                        case 'edit':
+                          widget.onEditTrack?.call(track);
+                        case 'remove':
+                          widget.onRemoveTrack?.call(track);
                       }
                     });
                   },
-                  itemBuilder: (_) => const [
-                    PopupMenuItem(value: 'next', child: Text('Play Next')),
-                    PopupMenuItem(value: 'queue', child: Text('Add to Queue')),
-                    PopupMenuItem(
+                  itemBuilder: (_) => [
+                    const PopupMenuItem(
+                      value: 'next',
+                      child: Text('Play Next'),
+                    ),
+                    const PopupMenuItem(
+                      value: 'queue',
+                      child: Text('Add to Queue'),
+                    ),
+                    const PopupMenuItem(
                       value: 'playlist',
                       child: Text('Add to Playlist'),
                     ),
+                    if (widget.onToggleFavorite != null)
+                      PopupMenuItem(
+                        value: 'favorite',
+                        child: Text(
+                          track.isFavorite ? 'Hapus dari Favorit' : 'Favorit',
+                        ),
+                      ),
+                    if (!isOnline && widget.onEditTrack != null)
+                      const PopupMenuItem(
+                        value: 'edit',
+                        child: Text('Edit Info'),
+                      ),
+                    if (!isOnline && widget.onRemoveTrack != null)
+                      const PopupMenuItem(
+                        value: 'remove',
+                        child: Text('Hapus dari Library'),
+                      ),
                   ],
                 ),
               ],

@@ -10,6 +10,45 @@ import '../services/cover_cache_service.dart';
 import '../services/library_database.dart';
 import 'music_source.dart';
 
+class ImportResult {
+  final int added;
+  final int duplicates;
+  final int unsupported;
+  final int recovered;
+
+  const ImportResult({
+    this.added = 0,
+    this.duplicates = 0,
+    this.unsupported = 0,
+    this.recovered = 0,
+  });
+
+  static const empty = ImportResult();
+
+  bool get hasChanges => added > 0 || recovered > 0;
+  bool get isEmpty =>
+      added == 0 && duplicates == 0 && unsupported == 0 && recovered == 0;
+
+  ImportResult operator +(ImportResult other) {
+    return ImportResult(
+      added: added + other.added,
+      duplicates: duplicates + other.duplicates,
+      unsupported: unsupported + other.unsupported,
+      recovered: recovered + other.recovered,
+    );
+  }
+
+  String formatFeedback() {
+    if (isEmpty) return 'Tidak ada file baru yang ditambahkan.';
+    final parts = <String>[];
+    if (added > 0) parts.add('$added lagu ditambahkan');
+    if (recovered > 0) parts.add('$recovered lagu dipulihkan');
+    if (duplicates > 0) parts.add('$duplicates duplikat dilewati');
+    if (unsupported > 0) parts.add('$unsupported format tidak didukung');
+    return '${parts.join(' • ')}.';
+  }
+}
+
 class LocalMusicSource extends MusicSource {
   static const _supportedExts = ['.mp3', '.flac', '.wav', '.ogg', '.opus'];
 
@@ -40,7 +79,7 @@ class LocalMusicSource extends MusicSource {
     return files
         .map((f) => f.path)
         .whereType<String>()
-        .where((p) => p.trim().isNotEmpty)
+        .where((path) => path.trim().isNotEmpty)
         .toList();
   }
 
@@ -64,6 +103,11 @@ class LocalMusicSource extends MusicSource {
   String _pathKey(String filePath) {
     final normalized = p.normalize(filePath);
     return Platform.isWindows ? normalized.toLowerCase() : normalized;
+  }
+
+  bool isSupportedAudioPath(String filePath) {
+    final lower = filePath.toLowerCase();
+    return _supportedExts.any((ext) => lower.endsWith(ext));
   }
 
   /// Loads persisted local tracks and watched folders straight from SQLite
@@ -142,49 +186,13 @@ class LocalMusicSource extends MusicSource {
   }
 
   /// Picks one or more local audio files and persists them in SQLite.
-  Future<int> pickFiles() async {
-    if (_isFilePickerBusy) return 0;
+  Future<ImportResult> pickFiles() async {
+    if (_isFilePickerBusy) return ImportResult.empty;
     _isFilePickerBusy = true;
     try {
       final files = await _pickFilesFn();
-      if (files.isEmpty) return 0;
-
-      final byPath = <String, Track>{
-        for (final t in _tracks) _pathKey(t.pathOrUrl): t,
-      };
-
-      final toUpsert = <Track>[];
-      int added = 0;
-
-      for (final path in files) {
-        if (path.trim().isEmpty) continue;
-        final key = _pathKey(path);
-        final existing = byPath[key];
-
-        if (existing != null) {
-          if (!existing.isAvailable) {
-            final refreshed = await buildTrackFromFile(
-              path,
-              existingId: existing.id,
-              addedAt: existing.addedAt,
-            );
-            byPath[key] = refreshed;
-            toUpsert.add(refreshed);
-          }
-          continue;
-        }
-
-        final created = await buildTrackFromFile(path);
-        byPath[key] = created;
-        toUpsert.add(created);
-        added++;
-      }
-
-      if (toUpsert.isNotEmpty) {
-        await _db.upsertTracks(toUpsert);
-        await loadFromDatabase();
-      }
-      return added;
+      if (files.isEmpty) return ImportResult.empty;
+      return await _importFilePaths(files);
     } finally {
       _isFilePickerBusy = false;
     }
@@ -192,12 +200,12 @@ class LocalMusicSource extends MusicSource {
 
   /// Picks a folder, registers it in `watched_folders`, scans recursively,
   /// and persists discovered tracks to SQLite.
-  Future<int> pickFolder() async {
-    if (_isFilePickerBusy) return 0;
+  Future<ImportResult> pickFolder() async {
+    if (_isFilePickerBusy) return ImportResult.empty;
     _isFilePickerBusy = true;
     try {
       final uri = await _pickDirectoryFn();
-      if (uri == null) return 0;
+      if (uri == null) return ImportResult.empty;
 
       String folderPath;
       try {
@@ -206,21 +214,128 @@ class LocalMusicSource extends MusicSource {
         debugPrint(
           '[LocalMusicSource.pickFolder] Unsupported directory URI ($uri): $e\n$st',
         );
-        return 0;
+        return ImportResult.empty;
       }
 
       await _db.addWatchedFolder(folderPath);
-      final added = await _scanFolderToDb(folderPath);
+      final result = await _scanFolderToDb(folderPath);
       await loadFromDatabase();
-      return added;
+      return result;
     } finally {
       _isFilePickerBusy = false;
     }
   }
 
-  Future<int> _scanFolderToDb(String folderPath) async {
+  /// Imports mixed dropped file and folder paths (for Desktop drag & drop)
+  /// with duplicate and unsupported-format detection.
+  Future<ImportResult> importDroppedPaths(List<String> paths) async {
+    if (paths.isEmpty) return ImportResult.empty;
+
+    final seenInput = <String>{};
+    final filePaths = <String>[];
+    var totalResult = ImportResult.empty;
+
+    for (final raw in paths) {
+      final trimmed = raw.trim();
+      if (trimmed.isEmpty) continue;
+      final normalized = p.normalize(trimmed);
+      final key = _pathKey(normalized);
+      if (!seenInput.add(key)) {
+        totalResult += const ImportResult(duplicates: 1);
+        continue;
+      }
+
+      if (Directory(normalized).existsSync()) {
+        await _db.addWatchedFolder(normalized);
+        totalResult += await _scanFolderToDb(normalized);
+      } else if (File(normalized).existsSync()) {
+        filePaths.add(normalized);
+      } else {
+        totalResult += const ImportResult(unsupported: 1);
+      }
+    }
+
+    if (filePaths.isNotEmpty) {
+      totalResult += await _importFilePaths(filePaths, reloadAfter: false);
+    }
+
+    await loadFromDatabase();
+    return totalResult;
+  }
+
+  Future<ImportResult> _importFilePaths(
+    List<String> paths, {
+    bool reloadAfter = true,
+  }) async {
+    final existingTracks = await _db.getAllTracks(
+      sourceType: TrackSourceType.local,
+    );
+    final byPath = <String, Track>{
+      for (final t in existingTracks) _pathKey(t.pathOrUrl): t,
+    };
+
+    final toUpsert = <Track>[];
+    int added = 0;
+    int duplicates = 0;
+    int unsupported = 0;
+    int recovered = 0;
+
+    for (final path in paths) {
+      if (path.trim().isEmpty) continue;
+      final normalized = p.normalize(path);
+      if (!isSupportedAudioPath(normalized)) {
+        unsupported++;
+        continue;
+      }
+
+      final key = _pathKey(normalized);
+      final existing = byPath[key];
+
+      if (existing != null) {
+        if (!existing.isAvailable) {
+          final refreshed = await buildTrackFromFile(
+            normalized,
+            existingId: existing.id,
+            addedAt: existing.addedAt,
+            existingLyrics: existing.lyrics,
+            existingTrack: existing,
+          );
+          byPath[key] = refreshed;
+          toUpsert.add(refreshed);
+          recovered++;
+        } else {
+          duplicates++;
+        }
+        continue;
+      }
+
+      final created = await buildTrackFromFile(normalized);
+      byPath[key] = created;
+      toUpsert.add(created);
+      added++;
+    }
+
+    if (toUpsert.isNotEmpty) {
+      await _db.upsertTracks(toUpsert);
+    }
+    if (reloadAfter && (toUpsert.isNotEmpty || _tracks.length != byPath.length)) {
+      await loadFromDatabase();
+    }
+
+    return ImportResult(
+      added: added,
+      duplicates: duplicates,
+      unsupported: unsupported,
+      recovered: recovered,
+    );
+  }
+
+  Future<ImportResult> _scanFolderToDb(
+    String folderPath, {
+    bool countDuplicates = true,
+  }) async {
     final dir = Directory(folderPath);
-    if (!dir.existsSync()) return 0;
+    if (!dir.existsSync()) return ImportResult.empty;
 
     final audioFiles = <File>[];
     _collectAudioFiles(dir, audioFiles);
@@ -233,6 +348,8 @@ class LocalMusicSource extends MusicSource {
 
     final toUpsert = <Track>[];
     int added = 0;
+    int duplicates = 0;
+    int recovered = 0;
 
     for (int i = 0; i < audioFiles.length; i++) {
       final file = audioFiles[i];
@@ -240,12 +357,18 @@ class LocalMusicSource extends MusicSource {
       final existing = existingByPath[key];
       if (existing != null) {
         if (!existing.isAvailable) {
-          final recovered = await buildTrackFromFile(
+          final recoveredTrack = await buildTrackFromFile(
             file.path,
             existingId: existing.id,
             addedAt: existing.addedAt,
+            existingLyrics: existing.lyrics,
+            existingTrack: existing,
           );
-          toUpsert.add(recovered);
+          existingByPath[key] = recoveredTrack;
+          toUpsert.add(recoveredTrack);
+          recovered++;
+        } else if (countDuplicates) {
+          duplicates++;
         }
         continue;
       }
@@ -263,7 +386,11 @@ class LocalMusicSource extends MusicSource {
     if (toUpsert.isNotEmpty) {
       await _db.upsertTracks(toUpsert);
     }
-    return added;
+    return ImportResult(
+      added: added,
+      duplicates: duplicates,
+      recovered: recovered,
+    );
   }
 
   /// Checks track file availability and metadata in the background and
@@ -301,6 +428,7 @@ class LocalMusicSource extends MusicSource {
             existingId: track.id,
             addedAt: track.addedAt,
             existingLyrics: track.lyrics,
+            existingTrack: track,
           );
           refreshedTracks.add(updated);
           if (!track.isAvailable) {
@@ -323,7 +451,9 @@ class LocalMusicSource extends MusicSource {
 
     int addedCount = 0;
     for (final folder in folders) {
-      addedCount += await _scanFolderToDb(folder);
+      final scanRes = await _scanFolderToDb(folder, countDuplicates: false);
+      addedCount += scanRes.added;
+      recoveredCount += scanRes.recovered;
     }
 
     await loadFromDatabase();
@@ -363,6 +493,7 @@ class LocalMusicSource extends MusicSource {
       existingId: existing.id,
       addedAt: existing.addedAt,
       existingLyrics: existing.lyrics,
+      existingTrack: existing,
     );
 
     await _db.relocateTrack(
@@ -374,6 +505,7 @@ class LocalMusicSource extends MusicSource {
       duration: rebuilt.duration,
       coverPath: rebuilt.coverPath,
       lyrics: rebuilt.lyrics,
+      preserveCustomMetadata: existing.hasCustomMetadata,
     );
 
     if (oldCoverPath != null && oldCoverPath != rebuilt.coverPath) {
@@ -388,37 +520,95 @@ class LocalMusicSource extends MusicSource {
     return await _db.getTrackById(trackId);
   }
 
+  /// Updates track title/artist/album overrides in SQLite without touching
+  /// the original audio file on disk.
+  Future<Track?> editTrackMetadata(
+    String trackId, {
+    required String title,
+    required String artist,
+    String? album,
+  }) async {
+    final cleanTitle = title.trim();
+    if (cleanTitle.isEmpty) return null;
+    final cleanArtist =
+        artist.trim().isEmpty ? 'Unknown Artist' : artist.trim();
+    final cleanAlbum =
+        (album == null || album.trim().isEmpty) ? null : album.trim();
+
+    await _db.updateTrackMetadata(
+      trackId,
+      title: cleanTitle,
+      artist: cleanArtist,
+      album: cleanAlbum,
+    );
+    await loadFromDatabase();
+    return await _db.getTrackById(trackId);
+  }
+
+  Future<Track?> setTrackFavorite(String trackId, bool isFavorite) async {
+    await _db.setTrackFavorite(trackId, isFavorite);
+    await loadFromDatabase();
+    return await _db.getTrackById(trackId);
+  }
+
   Future<void> markTrackUnavailable(String trackId) async {
     await _db.setTrackAvailability(trackId, false);
     await loadFromDatabase();
   }
 
-  Future<void> removeTrack(String trackId) async {
-    final existing = await _db.getTrackById(trackId);
-    await _db.deleteTrack(trackId);
+  /// Deletes [trackIds] from SQLite DB ONLY (never deletes files on disk).
+  /// Returns cover paths that were associated with deleted tracks so callers
+  /// can optionally defer cover cleanup until Undo expires.
+  Future<List<String>> removeTracks(
+    List<String> trackIds, {
+    bool cleanupCovers = false,
+  }) async {
+    if (trackIds.isEmpty) return const [];
 
-    final coverPath = existing?.coverPath;
-    if (coverPath != null && coverPath.isNotEmpty) {
+    final candidateCovers = <String>{};
+    for (final id in trackIds) {
+      final existing = await _db.getTrackById(id);
+      final coverPath = existing?.coverPath;
+      if (coverPath != null && coverPath.isNotEmpty) {
+        candidateCovers.add(coverPath);
+      }
+    }
+
+    await _db.deleteTracks(trackIds);
+
+    if (cleanupCovers && candidateCovers.isNotEmpty) {
+      await cleanupUnreferencedCovers(candidateCovers.toList());
+    }
+
+    await loadFromDatabase();
+    return candidateCovers.toList();
+  }
+
+  Future<void> cleanupUnreferencedCovers(List<String> coverPaths) async {
+    for (final coverPath in coverPaths) {
+      if (coverPath.isEmpty) continue;
       final stillUsed = await _db.isCoverPathReferenced(coverPath);
       await _coverCache.deleteCoverIfUnreferenced(
         coverPath,
         isStillReferenced: stillUsed,
       );
     }
+  }
 
+  Future<void> restoreTracks(List<Track> tracks) async {
+    if (tracks.isEmpty) return;
+    await _db.upsertTracks(tracks);
     await loadFromDatabase();
+  }
+
+  Future<void> removeTrack(String trackId) async {
+    await removeTracks([trackId], cleanupCovers: true);
   }
 
   Future<void> removeFolder(String folderPath) async {
     await _db.removeWatchedFolder(folderPath);
     final affectedCovers = await _db.deleteTracksUnderFolder(folderPath);
-    for (final coverPath in affectedCovers) {
-      final stillUsed = await _db.isCoverPathReferenced(coverPath);
-      await _coverCache.deleteCoverIfUnreferenced(
-        coverPath,
-        isStillReferenced: stillUsed,
-      );
-    }
+    await cleanupUnreferencedCovers(affectedCovers);
     await loadFromDatabase();
   }
 
@@ -426,8 +616,7 @@ class LocalMusicSource extends MusicSource {
     try {
       for (final entity in dir.listSync(followLinks: false)) {
         if (entity is File) {
-          final lower = entity.path.toLowerCase();
-          if (_supportedExts.any((ext) => lower.endsWith(ext))) {
+          if (isSupportedAudioPath(entity.path)) {
             out.add(entity);
           }
         } else if (entity is Directory) {
@@ -458,6 +647,7 @@ class LocalMusicSource extends MusicSource {
     String? existingId,
     DateTime? addedAt,
     String? existingLyrics,
+    Track? existingTrack,
   }) async {
     final fileName = p.basename(filePath);
     final fallbackTitle = fileName.replaceAll(RegExp(r'\.[^.]+$'), '');
@@ -503,18 +693,22 @@ class LocalMusicSource extends MusicSource {
       } catch (_) {}
     }
 
+    final keepCustom = existingTrack?.hasCustomMetadata ?? false;
+
     return Track(
       id: existingId ?? filePath,
-      title: title,
-      artist: artist,
-      album: album,
+      title: keepCustom ? existingTrack!.title : title,
+      artist: keepCustom ? existingTrack!.artist : artist,
+      album: keepCustom ? existingTrack!.album : album,
       pathOrUrl: filePath,
       sourceType: TrackSourceType.local,
-      coverPath: coverPath,
-      duration: duration,
+      coverPath: coverPath ?? existingTrack?.coverPath,
+      duration: duration ?? existingTrack?.duration,
       lyrics: lyrics ?? existingLyrics,
       addedAt: addedAt ?? DateTime.now(),
       isAvailable: true,
+      isFavorite: existingTrack?.isFavorite ?? false,
+      hasCustomMetadata: keepCustom,
     );
   }
 }

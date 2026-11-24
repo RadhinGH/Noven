@@ -9,7 +9,7 @@ import '../models/track.dart';
 
 class LibraryDatabase {
   static const _dbFileName = 'noven_library.db';
-  static const _dbVersion = 1;
+  static const _dbVersion = 2;
   static bool _ffiInitialized = false;
 
   final DatabaseFactory? _customFactory;
@@ -69,7 +69,9 @@ class LibraryDatabase {
               added_at INTEGER NOT NULL,
               is_available INTEGER NOT NULL DEFAULT 1,
               source_type TEXT NOT NULL DEFAULT 'local',
-              lyrics TEXT
+              lyrics TEXT,
+              is_favorite INTEGER NOT NULL DEFAULT 0,
+              has_custom_metadata INTEGER NOT NULL DEFAULT 0
             )
           ''');
           await db.execute(
@@ -81,6 +83,16 @@ class LibraryDatabase {
               added_at INTEGER NOT NULL
             )
           ''');
+        },
+        onUpgrade: (db, oldVersion, newVersion) async {
+          if (oldVersion < 2) {
+            await db.execute(
+              'ALTER TABLE tracks ADD COLUMN is_favorite INTEGER NOT NULL DEFAULT 0',
+            );
+            await db.execute(
+              'ALTER TABLE tracks ADD COLUMN has_custom_metadata INTEGER NOT NULL DEFAULT 0',
+            );
+          }
         },
       ),
     );
@@ -155,6 +167,36 @@ class LibraryDatabase {
     });
   }
 
+  Future<void> updateTrackMetadata(
+    String trackId, {
+    required String title,
+    required String artist,
+    String? album,
+  }) async {
+    final db = await open();
+    await db.update(
+      'tracks',
+      {
+        'title': title,
+        'artist': artist,
+        'album': album,
+        'has_custom_metadata': 1,
+      },
+      where: 'id = ?',
+      whereArgs: [trackId],
+    );
+  }
+
+  Future<void> setTrackFavorite(String trackId, bool isFavorite) async {
+    final db = await open();
+    await db.update(
+      'tracks',
+      {'is_favorite': isFavorite ? 1 : 0},
+      where: 'id = ?',
+      whereArgs: [trackId],
+    );
+  }
+
   Future<void> setTrackAvailability(String id, bool isAvailable) async {
     final db = await open();
     await db.update(
@@ -193,20 +235,24 @@ class LibraryDatabase {
     Duration? duration,
     String? coverPath,
     String? lyrics,
+    bool preserveCustomMetadata = false,
   }) async {
     final db = await open();
+    final values = <String, Object?>{
+      'path_or_uri': newPathOrUri,
+      'duration_ms': duration?.inMilliseconds,
+      'cover_path': coverPath,
+      'lyrics': lyrics,
+      'is_available': 1,
+    };
+    if (!preserveCustomMetadata) {
+      values['title'] = title;
+      values['artist'] = artist;
+      values['album'] = album;
+    }
     await db.update(
       'tracks',
-      {
-        'path_or_uri': newPathOrUri,
-        'title': title,
-        'artist': artist,
-        'album': album,
-        'duration_ms': duration?.inMilliseconds,
-        'cover_path': coverPath,
-        'lyrics': lyrics,
-        'is_available': 1,
-      },
+      values,
       where: 'id = ?',
       whereArgs: [trackId],
     );
@@ -215,6 +261,18 @@ class LibraryDatabase {
   Future<void> deleteTrack(String id) async {
     final db = await open();
     await db.delete('tracks', where: 'id = ?', whereArgs: [id]);
+  }
+
+  Future<void> deleteTracks(List<String> ids) async {
+    if (ids.isEmpty) return;
+    final db = await open();
+    await db.transaction((txn) async {
+      final batch = txn.batch();
+      for (final id in ids) {
+        batch.delete('tracks', where: 'id = ?', whereArgs: [id]);
+      }
+      await batch.commit(noResult: true);
+    });
   }
 
   Future<bool> isCoverPathReferenced(String coverPath) async {
@@ -311,6 +369,8 @@ class LibraryDatabase {
         'is_available': track.isAvailable ? 1 : 0,
         'source_type': track.sourceType.name,
         'lyrics': track.lyrics,
+        'is_favorite': track.isFavorite ? 1 : 0,
+        'has_custom_metadata': track.hasCustomMetadata ? 1 : 0,
       };
 
   Track _rowToTrack(Map<String, Object?> row) {
@@ -321,6 +381,8 @@ class LibraryDatabase {
     final durationMs = row['duration_ms'] as int?;
     final addedAtMs = row['added_at'] as int?;
     final isAvailableInt = row['is_available'] as int? ?? 1;
+    final isFavoriteInt = row['is_favorite'] as int? ?? 0;
+    final hasCustomMetaInt = row['has_custom_metadata'] as int? ?? 0;
 
     return Track(
       id: row['id'] as String,
@@ -337,6 +399,8 @@ class LibraryDatabase {
       isAvailable: isAvailableInt != 0,
       sourceType: sourceType,
       lyrics: row['lyrics'] as String?,
+      isFavorite: isFavoriteInt != 0,
+      hasCustomMetadata: hasCustomMetaInt != 0,
     );
   }
 }

@@ -70,6 +70,7 @@ class NovenSavedState {
   final bool shuffle;
   final PlaybackRepeatMode repeatMode;
   final List<Playlist> playlists;
+  final List<String> favoriteTrackIds;
   final String? lastTrackId;
   final int lastPositionMs;
 
@@ -85,6 +86,7 @@ class NovenSavedState {
     required this.shuffle,
     required this.repeatMode,
     this.playlists = const [],
+    this.favoriteTrackIds = const [],
     this.lastTrackId,
     this.lastPositionMs = 0,
   });
@@ -101,6 +103,7 @@ class NovenSavedState {
     shuffle: false,
     repeatMode: PlaybackRepeatMode.all,
     playlists: [],
+    favoriteTrackIds: [],
     lastTrackId: null,
     lastPositionMs: 0,
   );
@@ -117,6 +120,7 @@ class NovenSavedState {
     bool? shuffle,
     PlaybackRepeatMode? repeatMode,
     List<Playlist>? playlists,
+    List<String>? favoriteTrackIds,
     String? lastTrackId,
     bool clearLastTrackId = false,
     int? lastPositionMs,
@@ -134,6 +138,7 @@ class NovenSavedState {
       shuffle: shuffle ?? this.shuffle,
       repeatMode: repeatMode ?? this.repeatMode,
       playlists: playlists ?? this.playlists,
+      favoriteTrackIds: favoriteTrackIds ?? this.favoriteTrackIds,
       lastTrackId:
           clearLastTrackId ? null : (lastTrackId ?? this.lastTrackId),
       lastPositionMs: lastPositionMs ?? this.lastPositionMs,
@@ -152,6 +157,7 @@ class NovenSavedState {
         'shuffle': shuffle,
         'repeatMode': repeatMode.name,
         'playlists': playlists.map((p) => p.toJson()).toList(),
+        'favoriteTrackIds': favoriteTrackIds,
         'lastTrackId': lastTrackId,
         'lastPositionMs': lastPositionMs,
       };
@@ -235,6 +241,14 @@ class NovenSavedState {
       }
     }
 
+    final rawFavorites = json['favoriteTrackIds'];
+    final favoriteTrackIds = rawFavorites is List
+        ? rawFavorites
+            .whereType<String>()
+            .where((s) => s.trim().isNotEmpty)
+            .toList()
+        : <String>[];
+
     final rawLastTrackId = json['lastTrackId'];
     final lastTrackId =
         rawLastTrackId is String && rawLastTrackId.trim().isNotEmpty
@@ -258,6 +272,7 @@ class NovenSavedState {
       shuffle: shuffle,
       repeatMode: repeatMode,
       playlists: playlists,
+      favoriteTrackIds: favoriteTrackIds,
       lastTrackId: lastTrackId,
       lastPositionMs: lastPositionMs,
     );

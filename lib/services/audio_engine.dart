@@ -5,7 +5,42 @@ import 'package:flutter_soloud/flutter_soloud.dart';
 
 import '../models/track.dart';
 
-class AudioEngine {
+abstract class PlaybackBackend {
+  ValueNotifier<Float32List> get fftNotifier;
+  ValueNotifier<Duration> get positionNotifier;
+
+  bool get isPlaying;
+  bool get isMuted;
+  double get volume;
+  Duration get duration;
+  Duration get position;
+  bool get hasLoadedSource;
+
+  VoidCallback? get onStateChanged;
+  set onStateChanged(VoidCallback? value);
+
+  VoidCallback? get onTrackComplete;
+  set onTrackComplete(VoidCallback? value);
+
+  void setPreparedTrackState({
+    required Duration duration,
+    required Duration position,
+  });
+
+  void applyAudioSettings({required double volume, required bool isMuted});
+  Future<void> init();
+  Future<void> playTrack(Track track, {Duration? startPosition});
+  Future<bool> replayCurrent();
+  Future<void> stop();
+  void resetPosition();
+  void togglePause();
+  void seek(Duration target);
+  void setVolume(double value);
+  void toggleMute();
+  Future<void> dispose();
+}
+
+class AudioEngine implements PlaybackBackend {
   final SoLoud _soloud = SoLoud.instance;
 
   AudioSource? _currentSource;
@@ -20,22 +55,33 @@ class AudioEngine {
   int _playRequestId = 0;
 
   // Data FFT Real-Time & Posisi Lagu (pakai ValueNotifier agar UI tidak rebuild 20x/detik)
+  @override
   final ValueNotifier<Float32List> fftNotifier = ValueNotifier(Float32List(0));
+  @override
   final ValueNotifier<Duration> positionNotifier = ValueNotifier(Duration.zero);
 
   // State Player
+  @override
   bool isPlaying = false;
+  @override
   bool isMuted = false;
+  @override
   double volume = 0.6; // Mulai di 60% biar gak kena sound horeg
+  @override
   Duration duration = Duration.zero;
 
+  @override
   Duration get position => positionNotifier.value;
+  @override
   bool get hasLoadedSource => _currentSource != null;
 
   // Callback untuk memberitahu UI saat status playback berubah
+  @override
   VoidCallback? onStateChanged;
+  @override
   VoidCallback? onTrackComplete;
 
+  @override
   void setPreparedTrackState({
     required Duration duration,
     required Duration position,
@@ -49,6 +95,7 @@ class AudioEngine {
     onStateChanged?.call();
   }
 
+  @override
   void applyAudioSettings({required double volume, required bool isMuted}) {
     this.volume = volume.clamp(0.0, 1.0);
     this.isMuted = isMuted || this.volume == 0.0;
@@ -58,6 +105,7 @@ class AudioEngine {
     onStateChanged?.call();
   }
 
+  @override
   Future<void> init() async {
     if (_isInitialized) return;
     if (_initFuture != null) return _initFuture!;
@@ -144,6 +192,7 @@ class AudioEngine {
     }
   }
 
+  @override
   Future<void> playTrack(Track track, {Duration? startPosition}) async {
     final requestId = ++_playRequestId;
 
@@ -196,6 +245,7 @@ class AudioEngine {
     onStateChanged?.call();
   }
 
+  @override
   Future<bool> replayCurrent() async {
     final requestId = ++_playRequestId;
     final source = _currentSource;
@@ -229,10 +279,21 @@ class AudioEngine {
     return true;
   }
 
+  @override
+  Future<void> stop() async {
+    ++_playRequestId;
+    await _stopAndDisposeCurrentSource();
+    duration = Duration.zero;
+    positionNotifier.value = Duration.zero;
+    onStateChanged?.call();
+  }
+
+  @override
   void resetPosition() {
     positionNotifier.value = Duration.zero;
   }
 
+  @override
   void togglePause() {
     if (_currentSource == null || !_soloud.isInitialized) return;
     if (_currentHandle == null ||
@@ -251,6 +312,7 @@ class AudioEngine {
     onStateChanged?.call();
   }
 
+  @override
   void seek(Duration target) {
     if (_currentHandle == null || !_soloud.isInitialized) return;
     if (!_soloud.getIsValidVoiceHandle(_currentHandle!)) return;
@@ -259,6 +321,7 @@ class AudioEngine {
     positionNotifier.value = target;
   }
 
+  @override
   void setVolume(double value) {
     volume = value.clamp(0.0, 1.0);
     isMuted = volume == 0.0;
@@ -268,6 +331,7 @@ class AudioEngine {
     onStateChanged?.call();
   }
 
+  @override
   void toggleMute() {
     if (isMuted) {
       isMuted = false;
@@ -283,6 +347,7 @@ class AudioEngine {
     onStateChanged?.call();
   }
 
+  @override
   Future<void> dispose() async {
     ++_playRequestId;
     _isStoppingManually = true;
