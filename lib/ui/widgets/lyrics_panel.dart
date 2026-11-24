@@ -131,17 +131,19 @@ class _LyricsPanelState extends State<LyricsPanel> {
     }
     _lastScrolledIndex = activeIndex;
     WidgetsBinding.instance.addPostFrameCallback((_) {
-      if (!mounted) return;
+      if (!mounted || _showCoverOverride || !_scrollController.hasClients) {
+        return;
+      }
       if (activeIndex < 0 || activeIndex >= _lineKeys.length) return;
       final ctx = _lineKeys[activeIndex].currentContext;
-      if (ctx != null && ctx.mounted) {
-        Scrollable.ensureVisible(
-          ctx,
-          duration: const Duration(milliseconds: 350),
-          curve: Curves.easeOutCubic,
-          alignment: 0.35,
-        );
-      }
+      final renderObject = ctx?.findRenderObject();
+      if (renderObject == null || !renderObject.attached) return;
+      _scrollController.position.ensureVisible(
+        renderObject,
+        alignment: 0.35,
+        duration: const Duration(milliseconds: 350),
+        curve: Curves.easeOutCubic,
+      );
     });
   }
 
@@ -206,7 +208,12 @@ class _LyricsPanelState extends State<LyricsPanel> {
                       color: NovenColors.silver,
                     ),
                     onPressed: () {
-                      setState(() => _showCoverOverride = !_showCoverOverride);
+                      setState(() {
+                        _showCoverOverride = !_showCoverOverride;
+                        if (!_showCoverOverride) {
+                          _lastScrolledIndex = -1;
+                        }
+                      });
                     },
                   ),
                 )
@@ -327,6 +334,7 @@ class _LyricsPanelState extends State<LyricsPanel> {
 
         return Center(
           child: SingleChildScrollView(
+            primary: false,
             child: Column(
               mainAxisAlignment: MainAxisAlignment.center,
               mainAxisSize: MainAxisSize.min,

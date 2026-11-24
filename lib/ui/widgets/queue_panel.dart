@@ -11,6 +11,7 @@ class QueuePanel extends StatefulWidget {
   final bool isSearchActive;
   final bool initialShowQueue;
   final bool showModeSwitcher;
+  final double? maxListHeight;
   final ValueChanged<Track> onPlayFromQueue;
   final void Function(Track track, List<Track> list) onPlayFromAllTracks;
   final void Function(int oldIndex, int newIndex) onReorderQueue;
@@ -31,6 +32,7 @@ class QueuePanel extends StatefulWidget {
     this.isSearchActive = false,
     this.initialShowQueue = true,
     this.showModeSwitcher = true,
+    this.maxListHeight,
     required this.onPlayFromQueue,
     required this.onPlayFromAllTracks,
     required this.onReorderQueue,
@@ -63,7 +65,10 @@ class _QueuePanelState extends State<QueuePanel> {
         ? (widget.isSearchActive ? false : _showQueue)
         : true;
 
+    final isBounded = widget.maxListHeight != null;
+
     return Column(
+      mainAxisSize: isBounded ? MainAxisSize.min : MainAxisSize.max,
       crossAxisAlignment: CrossAxisAlignment.start,
       children: [
         Row(
@@ -143,36 +148,88 @@ class _QueuePanelState extends State<QueuePanel> {
           ],
         ),
         const SizedBox(height: 10),
-        Expanded(
-          child: activeShowQueue ? _buildQueueList() : _buildAllTracksList(),
-        ),
+        if (isBounded)
+          _buildBoundedList(activeShowQueue)
+        else
+          Expanded(
+            child: activeShowQueue ? _buildQueueList() : _buildAllTracksList(),
+          ),
       ],
     );
   }
 
-  Widget _buildQueueList() {
+  Widget _buildEmptyStateContainer(String message, {bool compact = false}) {
+    return Container(
+      width: double.infinity,
+      alignment: Alignment.center,
+      padding: compact
+          ? const EdgeInsets.symmetric(horizontal: 16, vertical: 18)
+          : const EdgeInsets.all(16),
+      decoration: BoxDecoration(
+        color: NovenColors.surface,
+        borderRadius: BorderRadius.circular(16),
+      ),
+      child: Text(
+        message,
+        textAlign: TextAlign.center,
+        style: TextStyle(
+          fontSize: 12.5,
+          color: NovenColors.silver.withValues(alpha: 0.65),
+        ),
+      ),
+    );
+  }
+
+  Widget _buildBoundedList(bool activeShowQueue) {
+    final isEmpty = activeShowQueue
+        ? widget.playQueue.isEmpty
+        : widget.allTracks.isEmpty;
+    if (isEmpty) {
+      return _buildEmptyStateContainer(
+        activeShowQueue
+            ? 'Queue kosong — putar lagu atau pilih dari All Tracks.'
+            : 'Tidak ada lagu yang cocok.',
+        compact: true,
+      );
+    }
+
+    final count = activeShowQueue
+        ? widget.playQueue.length
+        : widget.allTracks.length;
+    if (count <= 3) {
+      return activeShowQueue
+          ? _buildQueueList(
+              shrinkWrap: true,
+              physics: const NeverScrollableScrollPhysics(),
+            )
+          : _buildAllTracksList(
+              shrinkWrap: true,
+              physics: const NeverScrollableScrollPhysics(),
+            );
+    }
+
+    return SizedBox(
+      height: widget.maxListHeight!,
+      child: activeShowQueue ? _buildQueueList() : _buildAllTracksList(),
+    );
+  }
+
+  Widget _buildQueueList({
+    bool shrinkWrap = false,
+    ScrollPhysics? physics,
+  }) {
     if (widget.playQueue.isEmpty) {
-      return Container(
-        alignment: Alignment.center,
-        padding: const EdgeInsets.all(16),
-        decoration: BoxDecoration(
-          color: NovenColors.surface,
-          borderRadius: BorderRadius.circular(16),
-        ),
-        child: Text(
-          'Queue kosong — putar lagu atau pilih dari All Tracks.',
-          textAlign: TextAlign.center,
-          style: TextStyle(
-            fontSize: 12.5,
-            color: NovenColors.silver.withValues(alpha: 0.65),
-          ),
-        ),
+      return _buildEmptyStateContainer(
+        'Queue kosong — putar lagu atau pilih dari All Tracks.',
       );
     }
 
     return Material(
       type: MaterialType.transparency,
       child: ReorderableListView.builder(
+        primary: false,
+        shrinkWrap: shrinkWrap,
+        physics: physics,
         buildDefaultDragHandles: false,
         itemCount: widget.playQueue.length,
         onReorder: widget.onReorderQueue,
@@ -281,25 +338,18 @@ class _QueuePanelState extends State<QueuePanel> {
     );
   }
 
-  Widget _buildAllTracksList() {
+  Widget _buildAllTracksList({
+    bool shrinkWrap = false,
+    ScrollPhysics? physics,
+  }) {
     if (widget.allTracks.isEmpty) {
-      return Container(
-        alignment: Alignment.center,
-        decoration: BoxDecoration(
-          color: NovenColors.surface,
-          borderRadius: BorderRadius.circular(16),
-        ),
-        child: Text(
-          'Tidak ada lagu yang cocok.',
-          style: TextStyle(
-            fontSize: 12.5,
-            color: NovenColors.silver.withValues(alpha: 0.65),
-          ),
-        ),
-      );
+      return _buildEmptyStateContainer('Tidak ada lagu yang cocok.');
     }
 
     return ListView.separated(
+      primary: false,
+      shrinkWrap: shrinkWrap,
+      physics: physics,
       itemCount: widget.allTracks.length,
       separatorBuilder: (_, _) => const SizedBox(height: 8),
       itemBuilder: (context, index) {

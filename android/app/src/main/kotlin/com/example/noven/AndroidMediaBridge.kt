@@ -2,6 +2,7 @@ package com.example.noven
 
 import android.Manifest
 import android.app.Activity
+import android.app.NotificationManager
 import android.content.ContentUris
 import android.content.Context
 import android.content.Intent
@@ -39,6 +40,7 @@ class AndroidMediaBridge(private val activity: Activity) :
             "opus",
             "m4a",
         )
+        private val WHATSAPP_FILE_PATTERN = Regex("^aud-\\d{8}-wa\\d+\\..+$")
     }
 
     private var channel: MethodChannel? = null
@@ -51,9 +53,23 @@ class AndroidMediaBridge(private val activity: Activity) :
         channel = MethodChannel(messenger, CHANNEL_NAME).also {
             it.setMethodCallHandler(this)
         }
+        NovenPlaybackService.actionListener = { action, positionMs ->
+            mainHandler.post {
+                val payload = HashMap<String, Any?>()
+                payload["action"] = action
+                if (positionMs != null) {
+                    payload["positionMs"] = positionMs
+                }
+                channel?.invokeMethod("onMediaAction", payload)
+            }
+        }
     }
 
     fun dispose() {
+        NovenPlaybackService.actionListener = null
+        if (!activity.isChangingConfigurations) {
+            clearMediaNotification()
+        }
         channel?.setMethodCallHandler(null)
         channel = null
         pendingAudioResult = null
@@ -83,6 +99,14 @@ class AndroidMediaBridge(private val activity: Activity) :
                 val uri = call.argument<String>("uri")
                 val cacheDirPath = call.argument<String>("cacheDirPath")
                 materializeContentUri(uri, cacheDirPath, result)
+            }
+            "updateMediaNotification" -> {
+                updateMediaNotification(call)
+                result.success(true)
+            }
+            "clearMediaNotification" -> {
+                clearMediaNotification()
+                result.success(true)
             }
             else -> result.notImplemented()
         }
@@ -270,7 +294,7 @@ class AndroidMediaBridge(private val activity: Activity) :
     ): List<Map<String, Any?>> {
         val resolver = context.contentResolver
         val collection = MediaStore.Audio.Media.EXTERNAL_CONTENT_URI
-        val projection = arrayOf(
+        val projectionList = mutableListOf(
             MediaStore.Audio.Media._ID,
             MediaStore.Audio.Media.DATA,
             MediaStore.Audio.Media.TITLE,
@@ -283,6 +307,10 @@ class AndroidMediaBridge(private val activity: Activity) :
             MediaStore.Audio.Media.DATE_ADDED,
             MediaStore.Audio.Media.IS_MUSIC,
         )
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
+            projectionList.add(MediaStore.Audio.Media.RELATIVE_PATH)
+        }
+        val projection = projectionList.toTypedArray()
 
         val tracks = ArrayList<Map<String, Any?>>()
         val albumCoverCache = HashMap<Long, String?>()
@@ -304,28 +332,35 @@ class AndroidMediaBridge(private val activity: Activity) :
             val displayNameCol = cursor.getColumnIndex(MediaStore.Audio.Media.DISPLAY_NAME)
             val dateAddedCol = cursor.getColumnIndex(MediaStore.Audio.Media.DATE_ADDED)
             val isMusicCol = cursor.getColumnIndex(MediaStore.Audio.Media.IS_MUSIC)
+            val relativePathCol = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
+                cursor.getColumnIndex(MediaStore.Audio.Media.RELATIVE_PATH)
+            } else {
+                -1
+            }
 
             while (cursor.moveToNext()) {
                 val id = cursor.getLong(idCol)
                 val dataPath = if (dataCol >= 0) cursor.getString(dataCol) else null
                 val displayName =
                     if (displayNameCol >= 0) cursor.getString(displayNameCol) else null
+                val relativePath =
+                    if (relativePathCol >= 0) cursor.getString(relativePathCol) else null
                 val candidateName = (dataPath ?: displayName ?: "").lowercase()
                 val ext = candidateName.substringAfterLast('.', "")
                 if (ext !in SUPPORTED_EXTENSIONS) continue
 
-                val lowerPath = (dataPath ?: "").lowercase()
                 val isMusic = if (isMusicCol >= 0) cursor.getInt(isMusicCol) else 1
-                if (isMusic == 0 &&
-                    (lowerPath.contains("/ringtones/") ||
-                        lowerPath.contains("/notifications/") ||
-                        lowerPath.contains("/alarms/"))
+                val durationMs = if (durationCol >= 0) cursor.getLong(durationCol) else 0L
+                if (shouldExcludeMediaStoreItem(
+                        dataPath = dataPath,
+                        relativePath = relativePath,
+                        displayName = displayName,
+                        isMusic = isMusic,
+                        durationMs = durationMs,
+                    )
                 ) {
                     continue
                 }
-
-                val durationMs = if (durationCol >= 0) cursor.getLong(durationCol) else 0L
-                if (durationMs in 1..999) continue
 
                 val sizeBytes = if (sizeCol >= 0) cursor.getLong(sizeCol) else 0L
                 val trackUri = ContentUris.withAppendedId(collection, id)
@@ -378,6 +413,52 @@ class AndroidMediaBridge(private val activity: Activity) :
             }
         }
         return tracks
+    }
+
+    private fun shouldExcludeMediaStoreItem(
+        dataPath: String?,
+        relativePath: String?,
+        displayName: String?,
+        isMusic: Int,
+        durationMs: Long,
+    ): Boolean {
+        val normalizedPath = "${dataPath ?: ""}/${relativePath ?: ""}"
+            .replace('\\', '/')
+            .lowercase()
+
+        val excludedSegments = listOf(
+            "/whatsapp/",
+            "whatsapp audio",
+            "whatsapp voice",
+            "/ringtones/",
+            "/notifications/",
+            "/alarms/",
+            "/recordings/",
+            "/voice recorder/",
+            "/soundrecorder/",
+            "/call/",
+            "/callrecordings/",
+            "/miui/sound_recorder/",
+            "/telegram/telegram voice/",
+        )
+        if (excludedSegments.any { normalizedPath.contains(it) }) {
+            return true
+        }
+
+        val fileName = (displayName ?: dataPath?.substringAfterLast('/') ?: "")
+            .trim()
+            .lowercase()
+        if (fileName.startsWith("ptt-") || WHATSAPP_FILE_PATTERN.matches(fileName)) {
+            return true
+        }
+
+        if (durationMs in 1..2999) {
+            return true
+        }
+        if (isMusic == 0 && durationMs in 1..14999) {
+            return true
+        }
+        return false
     }
 
     private fun extractAlbumCover(
@@ -466,5 +547,50 @@ class AndroidMediaBridge(private val activity: Activity) :
                 mainHandler.post { result.success(null) }
             }
         }
+    }
+
+    private fun updateMediaNotification(call: MethodCall) {
+        val appContext = activity.applicationContext
+        val title = call.argument<String>("title") ?: ""
+        val artist = call.argument<String>("artist") ?: ""
+        val album = call.argument<String>("album")
+        val durationMs = call.argument<Number>("durationMs")?.toLong() ?: 0L
+        val positionMs = call.argument<Number>("positionMs")?.toLong() ?: 0L
+        val isPlaying = call.argument<Boolean>("isPlaying") ?: false
+        val coverPath = call.argument<String>("coverPath")
+
+        val intent = Intent(appContext, NovenPlaybackService::class.java).apply {
+            action = NovenPlaybackService.ACTION_UPDATE_STATE
+            putExtra(NovenPlaybackService.EXTRA_TITLE, title)
+            putExtra(NovenPlaybackService.EXTRA_ARTIST, artist)
+            putExtra(NovenPlaybackService.EXTRA_ALBUM, album)
+            putExtra(NovenPlaybackService.EXTRA_DURATION_MS, durationMs)
+            putExtra(NovenPlaybackService.EXTRA_POSITION_MS, positionMs)
+            putExtra(NovenPlaybackService.EXTRA_IS_PLAYING, isPlaying)
+            putExtra(NovenPlaybackService.EXTRA_COVER_PATH, coverPath)
+        }
+
+        try {
+            if (isPlaying) {
+                ContextCompat.startForegroundService(appContext, intent)
+            } else {
+                appContext.startService(intent)
+            }
+        } catch (_: Exception) {
+            try {
+                appContext.startService(intent)
+            } catch (_: Exception) {}
+        }
+    }
+
+    private fun clearMediaNotification() {
+        val appContext = activity.applicationContext
+        try {
+            val manager = appContext.getSystemService(Context.NOTIFICATION_SERVICE) as? NotificationManager
+            manager?.cancel(NovenPlaybackService.NOTIFICATION_ID)
+        } catch (_: Exception) {}
+        try {
+            appContext.stopService(Intent(appContext, NovenPlaybackService::class.java))
+        } catch (_: Exception) {}
     }
 }

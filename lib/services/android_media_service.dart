@@ -10,6 +10,16 @@ enum AndroidPermissionStatus {
   unsupported,
 }
 
+enum AndroidMediaAction {
+  play,
+  pause,
+  togglePlayPause,
+  next,
+  previous,
+  seek,
+  stop,
+}
+
 class AndroidMediaTrack {
   final String path;
   final String? contentUri;
@@ -71,13 +81,44 @@ class AndroidMediaService {
   final MethodChannel _channel;
   final bool _isSupported;
 
+  void Function(AndroidMediaAction action, Duration? seekPosition)? onMediaAction;
+
   AndroidMediaService({
     MethodChannel? channel,
     bool? isAndroidOverride,
   })  : _channel = channel ?? const MethodChannel(channelName),
-        _isSupported = isAndroidOverride ?? (!kIsWeb && Platform.isAndroid);
+        _isSupported = isAndroidOverride ?? (!kIsWeb && Platform.isAndroid) {
+    if (_isSupported) {
+      _channel.setMethodCallHandler(_handleNativeCall);
+    }
+  }
 
   bool get isSupported => _isSupported;
+
+  Future<dynamic> _handleNativeCall(MethodCall call) async {
+    if (call.method != 'onMediaAction') return null;
+    final args = call.arguments;
+    if (args is! Map) return null;
+    final rawAction = args['action'] as String?;
+    final action = switch (rawAction) {
+      'play' => AndroidMediaAction.play,
+      'pause' => AndroidMediaAction.pause,
+      'togglePlayPause' => AndroidMediaAction.togglePlayPause,
+      'next' => AndroidMediaAction.next,
+      'previous' => AndroidMediaAction.previous,
+      'seek' => AndroidMediaAction.seek,
+      'stop' => AndroidMediaAction.stop,
+      _ => null,
+    };
+    if (action == null) return null;
+
+    final rawPos = args['positionMs'];
+    final seekPos = rawPos is num && rawPos >= 0
+        ? Duration(milliseconds: rawPos.toInt())
+        : null;
+    onMediaAction?.call(action, seekPos);
+    return true;
+  }
 
   AndroidPermissionStatus _parseStatus(String? raw) {
     switch (raw) {
@@ -204,6 +245,51 @@ class AndroidMediaService {
     } on PlatformException catch (e) {
       debugPrint('[AndroidMediaService.materializeContentUri] $e');
       return null;
+    }
+  }
+
+  Future<void> updateMediaNotification({
+    required String title,
+    required String artist,
+    String? album,
+    required Duration duration,
+    required Duration position,
+    required bool isPlaying,
+    String? coverPath,
+  }) async {
+    if (!_isSupported) return;
+    try {
+      await _channel.invokeMethod<void>('updateMediaNotification', {
+        'title': title,
+        'artist': artist,
+        'album': album,
+        'durationMs': duration.inMilliseconds < 0 ? 0 : duration.inMilliseconds,
+        'positionMs': position.inMilliseconds < 0 ? 0 : position.inMilliseconds,
+        'isPlaying': isPlaying,
+        'coverPath': coverPath,
+      });
+    } on MissingPluginException {
+      // Abaikan di platform tanpa implementasi bridge native.
+    } on PlatformException catch (e) {
+      debugPrint('[AndroidMediaService.updateMediaNotification] $e');
+    }
+  }
+
+  Future<void> clearMediaNotification() async {
+    if (!_isSupported) return;
+    try {
+      await _channel.invokeMethod<void>('clearMediaNotification');
+    } on MissingPluginException {
+      // Abaikan di platform tanpa implementasi bridge native.
+    } on PlatformException catch (e) {
+      debugPrint('[AndroidMediaService.clearMediaNotification] $e');
+    }
+  }
+
+  void dispose() {
+    onMediaAction = null;
+    if (_isSupported) {
+      _channel.setMethodCallHandler(null);
     }
   }
 }

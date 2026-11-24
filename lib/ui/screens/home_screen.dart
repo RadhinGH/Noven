@@ -863,35 +863,33 @@ class _HomeScreenState extends State<HomeScreen> with WidgetsBindingObserver {
                               const SizedBox(height: 14),
                               _buildAlbumsSection(albums),
                               const SizedBox(height: 14),
-                              SizedBox(
-                                height: 220,
-                                child: QueuePanel(
-                                  playQueue: playQueue,
-                                  allTracks: visibleTracks,
-                                  currentTrackId: currentTrack?.id,
-                                  isSearchActive:
-                                      _searchQuery.trim().isNotEmpty,
-                                  initialShowQueue: playQueue.isNotEmpty,
-                                  onPlayFromQueue: (track) =>
-                                      _controller.playTrack(track, playQueue),
-                                  onPlayFromAllTracks: (track, list) =>
-                                      _controller.playTrack(
-                                        track,
-                                        list,
-                                        resetShuffleCycle: true,
-                                      ),
-                                  onReorderQueue: _controller.reorderQueue,
-                                  onRemoveFromQueue:
-                                      _controller.removeFromQueue,
-                                  onClearQueue: _controller.clearQueue,
-                                  onPlayNext: _controller.insertPlayNext,
-                                  onAddToQueue: _controller.addToQueue,
-                                  onAddToPlaylist: _promptAddTrackToPlaylist,
-                                  onToggleFavorite: _handleToggleFavorite,
-                                  onEditTrack: _handleEditTrack,
-                                  onRemoveTrack: (track) =>
-                                      _handleRemoveTracks([track.id]),
-                                ),
+                              QueuePanel(
+                                playQueue: playQueue,
+                                allTracks: visibleTracks,
+                                currentTrackId: currentTrack?.id,
+                                isSearchActive:
+                                    _searchQuery.trim().isNotEmpty,
+                                initialShowQueue: playQueue.isNotEmpty,
+                                maxListHeight: 220,
+                                onPlayFromQueue: (track) =>
+                                    _controller.playTrack(track, playQueue),
+                                onPlayFromAllTracks: (track, list) =>
+                                    _controller.playTrack(
+                                      track,
+                                      list,
+                                      resetShuffleCycle: true,
+                                    ),
+                                onReorderQueue: _controller.reorderQueue,
+                                onRemoveFromQueue:
+                                    _controller.removeFromQueue,
+                                onClearQueue: _controller.clearQueue,
+                                onPlayNext: _controller.insertPlayNext,
+                                onAddToQueue: _controller.addToQueue,
+                                onAddToPlaylist: _promptAddTrackToPlaylist,
+                                onToggleFavorite: _handleToggleFavorite,
+                                onEditTrack: _handleEditTrack,
+                                onRemoveTrack: (track) =>
+                                    _handleRemoveTracks([track.id]),
                               ),
                               const SizedBox(height: 14),
                               SizedBox(

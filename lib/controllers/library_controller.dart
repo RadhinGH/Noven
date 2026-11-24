@@ -102,6 +102,8 @@ class LibraryController extends ChangeNotifier {
   bool _isSelectionMode = false;
   final Set<String> _selectedTrackIds = {};
   _UndoRemoveSnapshot? _pendingUndo;
+  String? _lastNotifKey;
+  bool _suppressNotificationSync = false;
 
   LibraryController({
     PlaybackBackend? playback,
@@ -133,8 +135,11 @@ class LibraryController extends ChangeNotifier {
       debounceDuration: saveDebounceDuration,
       onSave: _persistState,
     );
+    _androidMedia.onMediaAction = _handleAndroidMediaAction;
     _engine.onStateChanged = () {
-      if (!_isDisposed) notifyListeners();
+      if (_isDisposed) return;
+      _syncAndroidMediaNotification();
+      notifyListeners();
     };
     _engine.onTrackComplete = onTrackComplete;
   }
@@ -610,6 +615,7 @@ class LibraryController extends ChangeNotifier {
 
     await refreshSources();
     syncActiveTrackSnapshots();
+    _syncAndroidMediaNotification(force: true);
     notifyListeners();
     return updated;
   }
@@ -784,6 +790,7 @@ class LibraryController extends ChangeNotifier {
         await _engine.stop();
         _currentTrack = null;
         _pendingResumePositionMs = 0;
+        _syncAndroidMediaNotification(force: true);
       }
     }
 
@@ -889,6 +896,7 @@ class LibraryController extends ChangeNotifier {
     _currentTrack = resolved;
     _playQueue = _dedupeTracks(queue);
     _isLoadingTrack = true;
+    _syncAndroidMediaNotification(force: true);
     notifyListeners();
 
     unawaited(saveNow(userAction: true));
@@ -896,6 +904,7 @@ class LibraryController extends ChangeNotifier {
     try {
       await _engine.playTrack(resolved, startPosition: startAt);
       if (!_isDisposed && invocationId == _playInvocationId) {
+        _syncAndroidMediaNotification(force: true);
         unawaited(ensureLyricsForTrack(resolved));
       }
     } catch (_) {
@@ -914,6 +923,9 @@ class LibraryController extends ChangeNotifier {
       if (!_isDisposed && invocationId == _playInvocationId) {
         _isLoadingTrack = false;
         _loadingTrackId = null;
+        if (!_engine.hasLoadedSource) {
+          _syncAndroidMediaNotification(force: true);
+        }
         notifyListeners();
       }
     }
@@ -1021,6 +1033,7 @@ class LibraryController extends ChangeNotifier {
     if (_engine.position > const Duration(seconds: 3)) {
       if (_engine.isPlaying) {
         _engine.seek(Duration.zero);
+        _syncAndroidMediaNotification(force: true);
       } else {
         _engine.replayCurrent();
       }
@@ -1080,7 +1093,84 @@ class LibraryController extends ChangeNotifier {
       scheduleSave(userAction: true);
     } else {
       _engine.seek(target);
+      _syncAndroidMediaNotification(force: true);
       scheduleSave(userAction: true);
+    }
+  }
+
+  void _syncAndroidMediaNotification({bool force = false}) {
+    if (_suppressNotificationSync || !_androidMedia.isSupported || _isDisposed) {
+      return;
+    }
+    final track = _currentTrack;
+    if (track == null || (!_engine.hasLoadedSource && !_isLoadingTrack)) {
+      if (_lastNotifKey != null || force) {
+        _lastNotifKey = null;
+        unawaited(_androidMedia.clearMediaNotification());
+      }
+      return;
+    }
+
+    final effectiveIsPlaying = _engine.isPlaying || _isLoadingTrack;
+    final effectiveDuration = _engine.duration > Duration.zero
+        ? _engine.duration
+        : (track.duration ?? Duration.zero);
+    final pos = _engine.position;
+
+    final key =
+        '${track.id}|${track.title}|${track.artist}|${track.album ?? ''}|${track.coverPath ?? ''}|$effectiveIsPlaying|${effectiveDuration.inMilliseconds}';
+    if (!force && _lastNotifKey == key) return;
+    _lastNotifKey = key;
+
+    unawaited(
+      _androidMedia.updateMediaNotification(
+        title: track.title,
+        artist: track.artist,
+        album: track.album,
+        duration: effectiveDuration,
+        position: pos,
+        isPlaying: effectiveIsPlaying,
+        coverPath: track.coverPath,
+      ),
+    );
+  }
+
+  void _handleAndroidMediaAction(
+    AndroidMediaAction action,
+    Duration? seekPosition,
+  ) {
+    if (_isDisposed) return;
+    switch (action) {
+      case AndroidMediaAction.play:
+        if (!_engine.isPlaying) {
+          togglePlayPause();
+        }
+      case AndroidMediaAction.pause:
+        if (_engine.isPlaying) {
+          togglePlayPause();
+        }
+      case AndroidMediaAction.togglePlayPause:
+        togglePlayPause();
+      case AndroidMediaAction.next:
+        playNext();
+      case AndroidMediaAction.previous:
+        playPrevious();
+      case AndroidMediaAction.seek:
+        if (seekPosition != null) {
+          seekToMs(seekPosition.inMilliseconds.toDouble());
+        }
+      case AndroidMediaAction.stop:
+        if (_engine.isPlaying) {
+          _suppressNotificationSync = true;
+          try {
+            _engine.togglePause();
+          } finally {
+            _suppressNotificationSync = false;
+          }
+          scheduleSave(userAction: true);
+        }
+        _lastNotifKey = null;
+        unawaited(_androidMedia.clearMediaNotification());
     }
   }
 
@@ -1242,6 +1332,10 @@ class LibraryController extends ChangeNotifier {
   void dispose() {
     _isDisposed = true;
     ++_playInvocationId;
+    if (_androidMedia.isSupported) {
+      unawaited(_androidMedia.clearMediaNotification());
+    }
+    _androidMedia.dispose();
     _playbackPersistTimer?.cancel();
     _playbackPersistTimer = null;
     _saveGuard.flushIfPending();
