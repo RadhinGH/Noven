@@ -15,15 +15,36 @@ class LocalMusicSource extends MusicSource {
 
   final LibraryDatabase _db;
   final CoverCacheService _coverCache;
+  final Future<List<String>> Function() _pickFilesFn;
+  final Future<Uri?> Function() _pickDirectoryFn;
 
   final List<Track> _tracks = [];
   final Set<String> _watchedFolders = {};
+  bool _isFilePickerBusy = false;
 
   LocalMusicSource({
     LibraryDatabase? db,
     CoverCacheService? coverCache,
+    Future<List<String>> Function()? pickFilesOverride,
+    Future<Uri?> Function()? pickDirectoryOverride,
   })  : _db = db ?? LibraryDatabase(),
-        _coverCache = coverCache ?? CoverCacheService();
+        _coverCache = coverCache ?? CoverCacheService(),
+        _pickFilesFn = pickFilesOverride ?? _defaultPickFiles,
+        _pickDirectoryFn = pickDirectoryOverride ?? FilePicker.pickDirectory;
+
+  static Future<List<String>> _defaultPickFiles() async {
+    final files = await FilePicker.pickFiles(
+      type: FileType.custom,
+      allowedExtensions: ['mp3', 'flac', 'wav', 'ogg', 'opus'],
+    );
+    return files
+        .map((f) => f.path)
+        .whereType<String>()
+        .where((p) => p.trim().isNotEmpty)
+        .toList();
+  }
+
+  bool get isFilePickerBusy => _isFilePickerBusy;
 
   @override
   String get id => 'local';
@@ -122,71 +143,79 @@ class LocalMusicSource extends MusicSource {
 
   /// Picks one or more local audio files and persists them in SQLite.
   Future<int> pickFiles() async {
-    final files = await FilePicker.pickFiles(
-      type: FileType.custom,
-      allowedExtensions: ['mp3', 'flac', 'wav', 'ogg', 'opus'],
-    );
-    if (files.isEmpty) return 0;
+    if (_isFilePickerBusy) return 0;
+    _isFilePickerBusy = true;
+    try {
+      final files = await _pickFilesFn();
+      if (files.isEmpty) return 0;
 
-    final byPath = <String, Track>{
-      for (final t in _tracks) _pathKey(t.pathOrUrl): t,
-    };
+      final byPath = <String, Track>{
+        for (final t in _tracks) _pathKey(t.pathOrUrl): t,
+      };
 
-    final toUpsert = <Track>[];
-    int added = 0;
+      final toUpsert = <Track>[];
+      int added = 0;
 
-    for (final file in files) {
-      final path = file.path;
-      if (path == null || path.trim().isEmpty) continue;
-      final key = _pathKey(path);
-      final existing = byPath[key];
+      for (final path in files) {
+        if (path.trim().isEmpty) continue;
+        final key = _pathKey(path);
+        final existing = byPath[key];
 
-      if (existing != null) {
-        if (!existing.isAvailable) {
-          final refreshed = await buildTrackFromFile(
-            path,
-            existingId: existing.id,
-            addedAt: existing.addedAt,
-          );
-          byPath[key] = refreshed;
-          toUpsert.add(refreshed);
+        if (existing != null) {
+          if (!existing.isAvailable) {
+            final refreshed = await buildTrackFromFile(
+              path,
+              existingId: existing.id,
+              addedAt: existing.addedAt,
+            );
+            byPath[key] = refreshed;
+            toUpsert.add(refreshed);
+          }
+          continue;
         }
-        continue;
+
+        final created = await buildTrackFromFile(path);
+        byPath[key] = created;
+        toUpsert.add(created);
+        added++;
       }
 
-      final created = await buildTrackFromFile(path);
-      byPath[key] = created;
-      toUpsert.add(created);
-      added++;
+      if (toUpsert.isNotEmpty) {
+        await _db.upsertTracks(toUpsert);
+        await loadFromDatabase();
+      }
+      return added;
+    } finally {
+      _isFilePickerBusy = false;
     }
-
-    if (toUpsert.isNotEmpty) {
-      await _db.upsertTracks(toUpsert);
-      await loadFromDatabase();
-    }
-    return added;
   }
 
   /// Picks a folder, registers it in `watched_folders`, scans recursively,
   /// and persists discovered tracks to SQLite.
   Future<int> pickFolder() async {
-    final uri = await FilePicker.pickDirectory();
-    if (uri == null) return 0;
-
-    String folderPath;
+    if (_isFilePickerBusy) return 0;
+    _isFilePickerBusy = true;
     try {
-      folderPath = uri.toFilePath();
-    } catch (e, st) {
-      debugPrint(
-        '[LocalMusicSource.pickFolder] Unsupported directory URI ($uri): $e\n$st',
-      );
-      return 0;
-    }
+      final uri = await _pickDirectoryFn();
+      if (uri == null) return 0;
 
-    await _db.addWatchedFolder(folderPath);
-    final added = await _scanFolderToDb(folderPath);
-    await loadFromDatabase();
-    return added;
+      String folderPath;
+      try {
+        folderPath = uri.toFilePath();
+      } catch (e, st) {
+        debugPrint(
+          '[LocalMusicSource.pickFolder] Unsupported directory URI ($uri): $e\n$st',
+        );
+        return 0;
+      }
+
+      await _db.addWatchedFolder(folderPath);
+      final added = await _scanFolderToDb(folderPath);
+      await loadFromDatabase();
+      return added;
+    } finally {
+      _isFilePickerBusy = false;
+    }
   }
 
   Future<int> _scanFolderToDb(String folderPath) async {
@@ -308,15 +337,18 @@ class LocalMusicSource extends MusicSource {
 
   /// Opens a file picker to locate a replacement file for [trackId].
   Future<Track?> relocateTrack(String trackId) async {
-    final files = await FilePicker.pickFiles(
-      type: FileType.custom,
-      allowedExtensions: ['mp3', 'flac', 'wav', 'ogg', 'opus'],
-    );
-    if (files.isEmpty) return null;
+    if (_isFilePickerBusy) return null;
+    _isFilePickerBusy = true;
+    try {
+      final files = await _pickFilesFn();
+      if (files.isEmpty) return null;
 
-    final path = files.first.path;
-    if (path == null || path.trim().isEmpty) return null;
-    return relocateTrackToPath(trackId, path);
+      final path = files.first;
+      if (path.trim().isEmpty) return null;
+      return await relocateTrackToPath(trackId, path);
+    } finally {
+      _isFilePickerBusy = false;
+    }
   }
 
   /// Relocates [trackId] to [newFilePath] in SQLite while keeping its `id`

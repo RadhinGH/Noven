@@ -67,6 +67,10 @@ class _HomeScreenState extends State<HomeScreen> with WidgetsBindingObserver {
   bool _legacyLibraryMigrated = false;
   bool _allowOverwriteAfterCorrupt = false;
   bool _isBackgroundRescanning = false;
+  bool _isPickingFiles = false;
+  int _playInvocationId = 0;
+  String? _loadingTrackId;
+  DateTime? _lastPlayStartedAt;
 
   int _selectedMenuIndex = 0; // 0 = Home, 1 = Library, 2 = Playlists, 3 = Sources
   String? _selectedAlbumName;
@@ -384,19 +388,35 @@ class _HomeScreenState extends State<HomeScreen> with WidgetsBindingObserver {
   }
 
   Future<void> _importFiles() async {
-    final added = await _localSource.pickFiles();
-    if (added > 0) {
-      await _refreshSources();
-      await _saveStateNow(userAction: true);
+    if (_isPickingFiles) return;
+    setState(() => _isPickingFiles = true);
+    try {
+      final added = await _localSource.pickFiles();
+      if (added > 0) {
+        await _refreshSources();
+        await _saveStateNow(userAction: true);
+      }
+    } finally {
+      if (mounted) {
+        setState(() => _isPickingFiles = false);
+      }
     }
   }
 
   Future<void> _importFolder() async {
-    final prevFolders = _localSource.watchedFolders.length;
-    final added = await _localSource.pickFolder();
-    if (added > 0 || _localSource.watchedFolders.length > prevFolders) {
-      await _refreshSources();
-      await _saveStateNow(userAction: true);
+    if (_isPickingFiles) return;
+    setState(() => _isPickingFiles = true);
+    try {
+      final prevFolders = _localSource.watchedFolders.length;
+      final added = await _localSource.pickFolder();
+      if (added > 0 || _localSource.watchedFolders.length > prevFolders) {
+        await _refreshSources();
+        await _saveStateNow(userAction: true);
+      }
+    } finally {
+      if (mounted) {
+        setState(() => _isPickingFiles = false);
+      }
     }
   }
 
@@ -419,14 +439,22 @@ class _HomeScreenState extends State<HomeScreen> with WidgetsBindingObserver {
   }
 
   Future<void> _locateTrack(Track track) async {
-    final updated = await _localSource.relocateTrack(track.id);
-    if (updated == null) return;
+    if (_isPickingFiles) return;
+    setState(() => _isPickingFiles = true);
+    try {
+      final updated = await _localSource.relocateTrack(track.id);
+      if (updated == null) return;
 
-    await _refreshSources();
-    _syncActiveTrackSnapshots();
-    await _saveStateNow(userAction: true);
-    if (!mounted) return;
-    _showStatusSnack('"${updated.title}" berhasil dihubungkan ulang.');
+      await _refreshSources();
+      _syncActiveTrackSnapshots();
+      await _saveStateNow(userAction: true);
+      if (!mounted) return;
+      _showStatusSnack('"${updated.title}" berhasil dihubungkan ulang.');
+    } finally {
+      if (mounted) {
+        setState(() => _isPickingFiles = false);
+      }
+    }
   }
 
   Future<void> _removeTrackFromLibrary(Track track) async {
@@ -469,6 +497,25 @@ class _HomeScreenState extends State<HomeScreen> with WidgetsBindingObserver {
     }
 
     final resolved = _withResolvedLyrics(track);
+
+    // Abaikan klik ganda pada lagu yang sama saat masih memuat
+    if (_isLoadingTrack && _loadingTrackId == resolved.id) {
+      return;
+    }
+    // Abaikan double-click sangat cepat (<500ms) pada lagu yang baru saja mulai diputar
+    if (startAt == null &&
+        _currentTrack?.id == resolved.id &&
+        _engine.isPlaying &&
+        _lastPlayStartedAt != null &&
+        DateTime.now().difference(_lastPlayStartedAt!) <
+            const Duration(milliseconds: 500)) {
+      return;
+    }
+
+    final invocationId = ++_playInvocationId;
+    _loadingTrackId = resolved.id;
+    _lastPlayStartedAt = DateTime.now();
+
     if (recordHistory &&
         _currentTrack != null &&
         _currentTrack!.id != resolved.id) {
@@ -494,7 +541,9 @@ class _HomeScreenState extends State<HomeScreen> with WidgetsBindingObserver {
 
     try {
       await _engine.playTrack(resolved, startPosition: startAt);
-      _ensureLyricsForTrack(resolved);
+      if (mounted && invocationId == _playInvocationId) {
+        _ensureLyricsForTrack(resolved);
+      }
     } catch (_) {
       if (resolved.sourceType == TrackSourceType.local &&
           !File(resolved.pathOrUrl).existsSync()) {
@@ -502,7 +551,7 @@ class _HomeScreenState extends State<HomeScreen> with WidgetsBindingObserver {
         await _refreshSources();
         if (mounted) _syncActiveTrackSnapshots();
       }
-      if (!mounted) return;
+      if (!mounted || invocationId != _playInvocationId) return;
       ScaffoldMessenger.of(context).showSnackBar(
         SnackBar(
           backgroundColor: NovenColors.surface,
@@ -513,7 +562,12 @@ class _HomeScreenState extends State<HomeScreen> with WidgetsBindingObserver {
         ),
       );
     } finally {
-      if (mounted) setState(() => _isLoadingTrack = false);
+      if (mounted && invocationId == _playInvocationId) {
+        setState(() {
+          _isLoadingTrack = false;
+          _loadingTrackId = null;
+        });
+      }
     }
   }
 
@@ -1315,12 +1369,12 @@ class _HomeScreenState extends State<HomeScreen> with WidgetsBindingObserver {
                   Icons.folder_open_rounded,
                   color: NovenColors.silver,
                 ),
-                onPressed: _importFolder,
+                onPressed: _isPickingFiles ? null : _importFolder,
               ),
               IconButton(
                 tooltip: 'Tambah Lagu',
                 icon: const Icon(Icons.add_rounded, color: NovenColors.silver),
-                onPressed: _importFiles,
+                onPressed: _isPickingFiles ? null : _importFiles,
               ),
             ],
           ),
@@ -1801,12 +1855,12 @@ class _HomeScreenState extends State<HomeScreen> with WidgetsBindingObserver {
                   runSpacing: 8,
                   children: [
                     OutlinedButton.icon(
-                      onPressed: _importFolder,
+                      onPressed: _isPickingFiles ? null : _importFolder,
                       icon: const Icon(Icons.folder_open_rounded),
                       label: const Text('Import Folder'),
                     ),
                     FilledButton.icon(
-                      onPressed: _importFiles,
+                      onPressed: _isPickingFiles ? null : _importFiles,
                       icon: const Icon(Icons.add_rounded),
                       label: const Text('Tambah Lagu'),
                     ),
@@ -2163,7 +2217,9 @@ class _HomeScreenState extends State<HomeScreen> with WidgetsBindingObserver {
                         children: isLocal
                             ? [
                                 OutlinedButton.icon(
-                                  onPressed: _importFolder,
+                                  onPressed: _isPickingFiles
+                                      ? null
+                                      : _importFolder,
                                   icon: const Icon(
                                     Icons.folder_open_rounded,
                                     size: 18,
@@ -2171,7 +2227,9 @@ class _HomeScreenState extends State<HomeScreen> with WidgetsBindingObserver {
                                   label: const Text('Import Folder'),
                                 ),
                                 OutlinedButton.icon(
-                                  onPressed: _importFiles,
+                                  onPressed: _isPickingFiles
+                                      ? null
+                                      : _importFiles,
                                   icon: const Icon(
                                     Icons.audio_file_rounded,
                                     size: 18,

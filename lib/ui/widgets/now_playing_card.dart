@@ -228,6 +228,9 @@ class NowPlayingCard extends StatelessWidget {
                     child: IconButton.filled(
                       style: IconButton.styleFrom(
                         backgroundColor: NovenColors.accent,
+                        disabledBackgroundColor: NovenColors.accent.withValues(
+                          alpha: 0.72,
+                        ),
                         fixedSize: const Size(38, 38),
                         padding: EdgeInsets.zero,
                       ),
@@ -247,7 +250,7 @@ class NowPlayingCard extends StatelessWidget {
                               color: Colors.white,
                               size: 22,
                             ),
-                      onPressed: onTogglePlay,
+                      onPressed: isLoading ? null : onTogglePlay,
                     ),
                   ),
                   IconButton(
