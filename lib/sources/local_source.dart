@@ -6,6 +6,7 @@ import 'package:flutter/foundation.dart';
 import 'package:path/path.dart' as p;
 
 import '../models/track.dart';
+import '../services/android_media_service.dart';
 import '../services/cover_cache_service.dart';
 import '../services/library_database.dart';
 import 'music_source.dart';
@@ -50,7 +51,14 @@ class ImportResult {
 }
 
 class LocalMusicSource extends MusicSource {
-  static const _supportedExts = ['.mp3', '.flac', '.wav', '.ogg', '.opus'];
+  static const _supportedExts = [
+    '.mp3',
+    '.flac',
+    '.wav',
+    '.ogg',
+    '.opus',
+    '.m4a',
+  ];
 
   final LibraryDatabase _db;
   final CoverCacheService _coverCache;
@@ -74,7 +82,7 @@ class LocalMusicSource extends MusicSource {
   static Future<List<String>> _defaultPickFiles() async {
     final files = await FilePicker.pickFiles(
       type: FileType.custom,
-      allowedExtensions: ['mp3', 'flac', 'wav', 'ogg', 'opus'],
+      allowedExtensions: ['mp3', 'flac', 'wav', 'ogg', 'opus', 'm4a'],
     );
     return files
         .map((f) => f.path)
@@ -82,6 +90,8 @@ class LocalMusicSource extends MusicSource {
         .where((path) => path.trim().isNotEmpty)
         .toList();
   }
+
+  Future<String> getCoversDirPath() => _coverCache.getCoversDirPath();
 
   bool get isFilePickerBusy => _isFilePickerBusy;
 
@@ -101,6 +111,7 @@ class LocalMusicSource extends MusicSource {
   Future<List<Track>> fetchTracks() async => List.unmodifiable(_tracks);
 
   String _pathKey(String filePath) {
+    if (filePath.startsWith('content://')) return filePath.trim();
     final normalized = p.normalize(filePath);
     return Platform.isWindows ? normalized.toLowerCase() : normalized;
   }
@@ -263,6 +274,98 @@ class LocalMusicSource extends MusicSource {
     return totalResult;
   }
 
+  /// Imports tracks queried from Android MediaStore into SQLite while
+  /// deduplicating by path/URI and preserving custom metadata & favorites.
+  Future<ImportResult> importAndroidMediaTracks(
+    List<AndroidMediaTrack> items,
+  ) async {
+    if (items.isEmpty) return ImportResult.empty;
+
+    final existingTracks = await _db.getAllTracks(
+      sourceType: TrackSourceType.local,
+    );
+    final byPath = <String, Track>{
+      for (final t in existingTracks) _pathKey(t.pathOrUrl): t,
+    };
+
+    final toUpsert = <Track>[];
+    int added = 0;
+    int duplicates = 0;
+    int recovered = 0;
+
+    for (final item in items) {
+      final rawPath = item.path.trim();
+      if (rawPath.isEmpty) continue;
+      final normalized = rawPath.startsWith('content://')
+          ? rawPath
+          : p.normalize(rawPath);
+      final key = _pathKey(normalized);
+      final existing = byPath[key];
+
+      if (existing != null) {
+        final shouldRecover = !existing.isAvailable;
+        final needsMetaBackfill =
+            existing.coverPath == null && item.coverPath != null;
+        if (shouldRecover || needsMetaBackfill) {
+          final updated = Track(
+            id: existing.id,
+            title: existing.hasCustomMetadata ? existing.title : item.title,
+            artist: existing.hasCustomMetadata ? existing.artist : item.artist,
+            album: existing.hasCustomMetadata
+                ? existing.album
+                : (item.album ?? existing.album),
+            pathOrUrl: normalized,
+            sourceType: TrackSourceType.local,
+            coverPath: existing.coverPath ?? item.coverPath,
+            duration: item.duration ?? existing.duration,
+            lyrics: existing.lyrics,
+            addedAt: existing.addedAt ?? item.addedAt ?? DateTime.now(),
+            isAvailable: true,
+            isFavorite: existing.isFavorite,
+            hasCustomMetadata: existing.hasCustomMetadata,
+          );
+          byPath[key] = updated;
+          toUpsert.add(updated);
+          if (shouldRecover) {
+            recovered++;
+          } else {
+            duplicates++;
+          }
+        } else {
+          duplicates++;
+        }
+        continue;
+      }
+
+      final created = Track(
+        id: normalized,
+        title: item.title,
+        artist: item.artist,
+        album: item.album,
+        pathOrUrl: normalized,
+        sourceType: TrackSourceType.local,
+        coverPath: item.coverPath,
+        duration: item.duration,
+        addedAt: item.addedAt ?? DateTime.now(),
+        isAvailable: true,
+      );
+      byPath[key] = created;
+      toUpsert.add(created);
+      added++;
+    }
+
+    if (toUpsert.isNotEmpty) {
+      await _db.upsertTracks(toUpsert);
+    }
+    await loadFromDatabase();
+
+    return ImportResult(
+      added: added,
+      duplicates: duplicates,
+      recovered: recovered,
+    );
+  }
+
   Future<ImportResult> _importFilePaths(
     List<String> paths, {
     bool reloadAfter = true,
@@ -411,6 +514,9 @@ class LocalMusicSource extends MusicSource {
 
     for (int i = 0; i < currentTracks.length; i++) {
       final track = currentTracks[i];
+      if (track.pathOrUrl.startsWith('content://')) {
+        continue;
+      }
       final exists = await File(track.pathOrUrl).exists();
 
       if (!exists) {

@@ -66,6 +66,381 @@ class NowPlayingCard extends StatelessWidget {
     return '$minutes:$seconds';
   }
 
+  Widget _buildPlayPauseButton({required double size}) {
+    return Container(
+      decoration: BoxDecoration(
+        shape: BoxShape.circle,
+        boxShadow: [
+          BoxShadow(
+            color: NovenColors.accent.withValues(alpha: 0.55),
+            blurRadius: 14,
+          ),
+        ],
+      ),
+      child: IconButton.filled(
+        style: IconButton.styleFrom(
+          backgroundColor: NovenColors.accent,
+          disabledBackgroundColor: NovenColors.accent.withValues(alpha: 0.72),
+          fixedSize: Size(size, size),
+          padding: EdgeInsets.zero,
+        ),
+        icon: isLoading
+            ? const SizedBox(
+                width: 18,
+                height: 18,
+                child: CircularProgressIndicator(
+                  strokeWidth: 2,
+                  color: Colors.white,
+                ),
+              )
+            : Icon(
+                isPlaying ? Icons.pause_rounded : Icons.play_arrow_rounded,
+                color: Colors.white,
+                size: 24,
+              ),
+        onPressed: isLoading ? null : onTogglePlay,
+      ),
+    );
+  }
+
+  Widget _buildSeekSlider(double maxMs) {
+    return ValueListenableBuilder<Duration>(
+      valueListenable: positionListenable,
+      builder: (context, position, _) {
+        final currentMs = (isSeeking
+                ? seekValueMs
+                : position.inMilliseconds.toDouble())
+            .clamp(0.0, maxMs);
+        return Slider(
+          value: currentMs,
+          max: maxMs,
+          activeColor: NovenColors.accentLight,
+          inactiveColor: Colors.white12,
+          onChangeStart: onSeekStart,
+          onChanged: onSeekChange,
+          onChangeEnd: onSeekEnd,
+        );
+      },
+    );
+  }
+
+  Widget _buildCompactMobileLayout({
+    required double maxMs,
+    required double effectiveVolume,
+    required bool isRepeatActive,
+  }) {
+    return Column(
+      mainAxisSize: MainAxisSize.min,
+      children: [
+        // Baris 1: Cover + Judul/Artis + Queue + Mute (semua min 48dp)
+        Row(
+          children: [
+            CoverArt(track: track, size: 44, radius: 12),
+            const SizedBox(width: 10),
+            Expanded(
+              child: Column(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  Text(
+                    track?.title ?? 'Now Playing',
+                    style: const TextStyle(
+                      fontWeight: FontWeight.bold,
+                      fontSize: 13.5,
+                      color: Colors.white,
+                    ),
+                    maxLines: 1,
+                    overflow: TextOverflow.ellipsis,
+                  ),
+                  const SizedBox(height: 2),
+                  Text(
+                    track?.artist ?? 'Noven Player',
+                    style: TextStyle(
+                      fontSize: 11.5,
+                      color: NovenColors.silver.withValues(alpha: 0.78),
+                    ),
+                    maxLines: 1,
+                    overflow: TextOverflow.ellipsis,
+                  ),
+                ],
+              ),
+            ),
+            if (onOpenQueue != null)
+              Tooltip(
+                message: 'Play Queue ($queueCount)',
+                child: IconButton(
+                  constraints: const BoxConstraints(
+                    minWidth: 48,
+                    minHeight: 48,
+                  ),
+                  padding: EdgeInsets.zero,
+                  icon: const Icon(
+                    Icons.playlist_play_rounded,
+                    size: 22,
+                    color: NovenColors.silver,
+                  ),
+                  onPressed: onOpenQueue,
+                ),
+              ),
+            Tooltip(
+              message: effectiveVolume == 0 ? 'Unmute' : 'Mute',
+              child: IconButton(
+                constraints: const BoxConstraints(
+                  minWidth: 48,
+                  minHeight: 48,
+                ),
+                padding: EdgeInsets.zero,
+                icon: Icon(
+                  effectiveVolume == 0
+                      ? Icons.volume_off_rounded
+                      : effectiveVolume < 0.5
+                          ? Icons.volume_down_rounded
+                          : Icons.volume_up_rounded,
+                  size: 20,
+                  color: NovenColors.silver,
+                ),
+                onPressed: onToggleMute,
+              ),
+            ),
+          ],
+        ),
+        const SizedBox(height: 4),
+
+        // Baris 2: Seek bar lebar penuh + timestamp kiri/kanan
+        SizedBox(height: 28, child: _buildSeekSlider(maxMs)),
+        Padding(
+          padding: const EdgeInsets.symmetric(horizontal: 6),
+          child: ValueListenableBuilder<Duration>(
+            valueListenable: positionListenable,
+            builder: (context, position, _) {
+              final displayPosition = isSeeking
+                  ? Duration(milliseconds: seekValueMs.toInt())
+                  : position;
+              return Row(
+                mainAxisAlignment: MainAxisAlignment.spaceBetween,
+                children: [
+                  Text(
+                    _formatDuration(displayPosition),
+                    style: TextStyle(
+                      fontSize: 11,
+                      color: NovenColors.silver.withValues(alpha: 0.78),
+                    ),
+                  ),
+                  Text(
+                    _formatDuration(duration),
+                    style: TextStyle(
+                      fontSize: 11,
+                      color: NovenColors.silver.withValues(alpha: 0.78),
+                    ),
+                  ),
+                ],
+              );
+            },
+          ),
+        ),
+        const SizedBox(height: 4),
+
+        // Baris 3: Kontrol playback sentuh min 48x48dp
+        Row(
+          mainAxisAlignment: MainAxisAlignment.spaceEvenly,
+          children: [
+            _ModeIconButton(
+              icon: Icons.shuffle_rounded,
+              tooltip: isShuffle ? 'Shuffle: On' : 'Shuffle: Off',
+              isActive: isShuffle,
+              minTouchSize: 48,
+              onPressed: onToggleShuffle,
+            ),
+            IconButton(
+              constraints: const BoxConstraints(minWidth: 48, minHeight: 48),
+              padding: EdgeInsets.zero,
+              icon: const Icon(
+                Icons.skip_previous_rounded,
+                size: 26,
+                color: NovenColors.silver,
+              ),
+              onPressed: onPrev,
+            ),
+            _buildPlayPauseButton(size: 48),
+            IconButton(
+              constraints: const BoxConstraints(minWidth: 48, minHeight: 48),
+              padding: EdgeInsets.zero,
+              icon: const Icon(
+                Icons.skip_next_rounded,
+                size: 26,
+                color: NovenColors.silver,
+              ),
+              onPressed: onNext,
+            ),
+            _ModeIconButton(
+              icon: repeatMode == PlaybackRepeatMode.one
+                  ? Icons.repeat_one_rounded
+                  : Icons.repeat_rounded,
+              tooltip: repeatMode.tooltip,
+              isActive: isRepeatActive,
+              minTouchSize: 48,
+              onPressed: onCycleRepeat,
+            ),
+          ],
+        ),
+      ],
+    );
+  }
+
+  Widget _buildWideLayout({
+    required double maxMs,
+    required double effectiveVolume,
+    required bool isRepeatActive,
+  }) {
+    return Column(
+      mainAxisSize: MainAxisSize.min,
+      children: [
+        // Baris Atas: Cover + Judul/Artis + Timestamp + Volume
+        Row(
+          children: [
+            CoverArt(track: track, size: 46, radius: 12),
+            const SizedBox(width: 12),
+            Expanded(
+              child: Column(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  Text(
+                    track?.title ?? 'Now Playing',
+                    style: const TextStyle(
+                      fontWeight: FontWeight.bold,
+                      fontSize: 14,
+                      color: Colors.white,
+                    ),
+                    maxLines: 1,
+                    overflow: TextOverflow.ellipsis,
+                  ),
+                  const SizedBox(height: 2),
+                  Text(
+                    track?.artist ?? 'Noven Player',
+                    style: TextStyle(
+                      fontSize: 12,
+                      color: NovenColors.silver.withValues(alpha: 0.78),
+                    ),
+                    maxLines: 1,
+                    overflow: TextOverflow.ellipsis,
+                  ),
+                ],
+              ),
+            ),
+            const SizedBox(width: 8),
+            ValueListenableBuilder<Duration>(
+              valueListenable: positionListenable,
+              builder: (context, position, _) {
+                final displayPosition = isSeeking
+                    ? Duration(milliseconds: seekValueMs.toInt())
+                    : position;
+                return Text(
+                  '${_formatDuration(displayPosition)} / ${_formatDuration(duration)}',
+                  style: TextStyle(
+                    fontSize: 11.5,
+                    color: NovenColors.silver.withValues(alpha: 0.8),
+                  ),
+                );
+              },
+            ),
+            const SizedBox(width: 6),
+            if (onOpenQueue != null)
+              Tooltip(
+                message: 'Play Queue ($queueCount)',
+                child: IconButton(
+                  constraints: const BoxConstraints(
+                    minWidth: 40,
+                    minHeight: 40,
+                  ),
+                  padding: EdgeInsets.zero,
+                  icon: const Icon(
+                    Icons.playlist_play_rounded,
+                    size: 20,
+                    color: NovenColors.silver,
+                  ),
+                  onPressed: onOpenQueue,
+                ),
+              ),
+            IconButton(
+              constraints: const BoxConstraints(minWidth: 40, minHeight: 40),
+              padding: EdgeInsets.zero,
+              icon: Icon(
+                effectiveVolume == 0
+                    ? Icons.volume_off_rounded
+                    : effectiveVolume < 0.5
+                        ? Icons.volume_down_rounded
+                        : Icons.volume_up_rounded,
+                size: 19,
+                color: NovenColors.silver,
+              ),
+              onPressed: onToggleMute,
+            ),
+            SizedBox(
+              width: 96,
+              child: Slider(
+                value: effectiveVolume,
+                min: 0.0,
+                max: 1.0,
+                activeColor: NovenColors.accentLight,
+                inactiveColor: Colors.white12,
+                onChanged: onVolumeChange,
+                onChangeEnd: onVolumeChangeEnd,
+              ),
+            ),
+          ],
+        ),
+        const SizedBox(height: 6),
+
+        // Baris Bawah: Shuffle / Prev / Play-Pause / Next / Repeat + Seek Slider
+        Row(
+          children: [
+            _ModeIconButton(
+              icon: Icons.shuffle_rounded,
+              tooltip: isShuffle ? 'Shuffle: On' : 'Shuffle: Off',
+              isActive: isShuffle,
+              minTouchSize: 38,
+              onPressed: onToggleShuffle,
+            ),
+            IconButton(
+              constraints: const BoxConstraints(minWidth: 38, minHeight: 38),
+              padding: EdgeInsets.zero,
+              icon: const Icon(
+                Icons.skip_previous_rounded,
+                color: NovenColors.silver,
+              ),
+              onPressed: onPrev,
+            ),
+            _buildPlayPauseButton(size: 40),
+            IconButton(
+              constraints: const BoxConstraints(minWidth: 38, minHeight: 38),
+              padding: EdgeInsets.zero,
+              icon: const Icon(
+                Icons.skip_next_rounded,
+                color: NovenColors.silver,
+              ),
+              onPressed: onNext,
+            ),
+            _ModeIconButton(
+              icon: repeatMode == PlaybackRepeatMode.one
+                  ? Icons.repeat_one_rounded
+                  : Icons.repeat_rounded,
+              tooltip: repeatMode.tooltip,
+              isActive: isRepeatActive,
+              minTouchSize: 38,
+              onPressed: onCycleRepeat,
+            ),
+            const SizedBox(width: 6),
+            Expanded(
+              child: SizedBox(
+                height: 24,
+                child: _buildSeekSlider(maxMs),
+              ),
+            ),
+          ],
+        ),
+      ],
+    );
+  }
+
   @override
   Widget build(BuildContext context) {
     final maxMs = duration.inMilliseconds > 0
@@ -74,236 +449,41 @@ class NowPlayingCard extends StatelessWidget {
     final effectiveVolume = isMuted ? 0.0 : volume;
     final isRepeatActive = repeatMode != PlaybackRepeatMode.off;
 
-    return Container(
-      padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 12),
-      decoration: BoxDecoration(
-        color: NovenColors.surface,
-        borderRadius: BorderRadius.circular(20),
-        gradient: LinearGradient(
-          begin: Alignment.centerLeft,
-          end: Alignment.centerRight,
-          colors: [
-            NovenColors.surface,
-            NovenColors.accent.withValues(alpha: 0.2),
-          ],
-        ),
-        border: Border.all(color: Colors.white.withValues(alpha: 0.06)),
-      ),
-      child: LayoutBuilder(
-        builder: (context, constraints) {
-          final showVolumeSlider = constraints.maxWidth >= 430;
+    return LayoutBuilder(
+      builder: (context, constraints) {
+        final isCompactMobile = constraints.maxWidth < 520;
 
-          return Column(
-            mainAxisSize: MainAxisSize.min,
-            children: [
-              // Baris Atas: Cover + Judul/Artis + Timestamp + Volume
-              Row(
-                children: [
-                  CoverArt(track: track, size: 46, radius: 12),
-                  const SizedBox(width: 12),
-                  Expanded(
-                    child: Column(
-                      crossAxisAlignment: CrossAxisAlignment.start,
-                      children: [
-                        Text(
-                          track?.title ?? 'Now Playing',
-                          style: const TextStyle(
-                            fontWeight: FontWeight.bold,
-                            fontSize: 14,
-                            color: Colors.white,
-                          ),
-                          maxLines: 1,
-                          overflow: TextOverflow.ellipsis,
-                        ),
-                        const SizedBox(height: 2),
-                        Text(
-                          track?.artist ?? 'Noven Player',
-                          style: TextStyle(
-                            fontSize: 12,
-                            color: NovenColors.silver.withValues(alpha: 0.78),
-                          ),
-                          maxLines: 1,
-                          overflow: TextOverflow.ellipsis,
-                        ),
-                      ],
-                    ),
-                  ),
-                  const SizedBox(width: 8),
-                  ValueListenableBuilder<Duration>(
-                    valueListenable: positionListenable,
-                    builder: (context, position, _) {
-                      final displayPosition = isSeeking
-                          ? Duration(milliseconds: seekValueMs.toInt())
-                          : position;
-                      return Text(
-                        '${_formatDuration(displayPosition)} / ${_formatDuration(duration)}',
-                        style: TextStyle(
-                          fontSize: 11.5,
-                          color: NovenColors.silver.withValues(alpha: 0.8),
-                        ),
-                      );
-                    },
-                  ),
-                  const SizedBox(width: 6),
-                  if (onOpenQueue != null)
-                    Tooltip(
-                      message: 'Play Queue ($queueCount)',
-                      child: IconButton(
-                        visualDensity: VisualDensity.compact,
-                        constraints: const BoxConstraints(
-                          minWidth: 32,
-                          minHeight: 32,
-                        ),
-                        padding: EdgeInsets.zero,
-                        icon: const Icon(
-                          Icons.playlist_play_rounded,
-                          size: 20,
-                          color: NovenColors.silver,
-                        ),
-                        onPressed: onOpenQueue,
-                      ),
-                    ),
-                  IconButton(
-                    visualDensity: VisualDensity.compact,
-                    icon: Icon(
-                      effectiveVolume == 0
-                          ? Icons.volume_off_rounded
-                          : effectiveVolume < 0.5
-                              ? Icons.volume_down_rounded
-                              : Icons.volume_up_rounded,
-                      size: 19,
-                      color: NovenColors.silver,
-                    ),
-                    onPressed: onToggleMute,
-                  ),
-                  if (showVolumeSlider)
-                    SizedBox(
-                      width: 96,
-                      child: Slider(
-                        value: effectiveVolume,
-                        min: 0.0,
-                        max: 1.0,
-                        activeColor: NovenColors.accentLight,
-                        inactiveColor: Colors.white12,
-                        onChanged: onVolumeChange,
-                        onChangeEnd: onVolumeChangeEnd,
-                      ),
-                    ),
-                ],
-              ),
-              const SizedBox(height: 6),
-
-              // Baris Bawah: Shuffle / Prev / Play-Pause / Next / Repeat + Seek Slider
-              Row(
-                children: [
-                  _ModeIconButton(
-                    icon: Icons.shuffle_rounded,
-                    tooltip: isShuffle ? 'Shuffle: On' : 'Shuffle: Off',
-                    isActive: isShuffle,
-                    onPressed: onToggleShuffle,
-                  ),
-                  IconButton(
-                    visualDensity: VisualDensity.compact,
-                    constraints: const BoxConstraints(
-                      minWidth: 34,
-                      minHeight: 34,
-                    ),
-                    padding: EdgeInsets.zero,
-                    icon: const Icon(
-                      Icons.skip_previous_rounded,
-                      color: NovenColors.silver,
-                    ),
-                    onPressed: onPrev,
-                  ),
-                  Container(
-                    decoration: BoxDecoration(
-                      shape: BoxShape.circle,
-                      boxShadow: [
-                        BoxShadow(
-                          color: NovenColors.accent.withValues(alpha: 0.55),
-                          blurRadius: 14,
-                        ),
-                      ],
-                    ),
-                    child: IconButton.filled(
-                      style: IconButton.styleFrom(
-                        backgroundColor: NovenColors.accent,
-                        disabledBackgroundColor: NovenColors.accent.withValues(
-                          alpha: 0.72,
-                        ),
-                        fixedSize: const Size(38, 38),
-                        padding: EdgeInsets.zero,
-                      ),
-                      icon: isLoading
-                          ? const SizedBox(
-                              width: 18,
-                              height: 18,
-                              child: CircularProgressIndicator(
-                                strokeWidth: 2,
-                                color: Colors.white,
-                              ),
-                            )
-                          : Icon(
-                              isPlaying
-                                  ? Icons.pause_rounded
-                                  : Icons.play_arrow_rounded,
-                              color: Colors.white,
-                              size: 22,
-                            ),
-                      onPressed: isLoading ? null : onTogglePlay,
-                    ),
-                  ),
-                  IconButton(
-                    visualDensity: VisualDensity.compact,
-                    constraints: const BoxConstraints(
-                      minWidth: 34,
-                      minHeight: 34,
-                    ),
-                    padding: EdgeInsets.zero,
-                    icon: const Icon(
-                      Icons.skip_next_rounded,
-                      color: NovenColors.silver,
-                    ),
-                    onPressed: onNext,
-                  ),
-                  _ModeIconButton(
-                    icon: repeatMode == PlaybackRepeatMode.one
-                        ? Icons.repeat_one_rounded
-                        : Icons.repeat_rounded,
-                    tooltip: repeatMode.tooltip,
-                    isActive: isRepeatActive,
-                    onPressed: onCycleRepeat,
-                  ),
-                  const SizedBox(width: 6),
-                  Expanded(
-                    child: SizedBox(
-                      height: 24,
-                      child: ValueListenableBuilder<Duration>(
-                        valueListenable: positionListenable,
-                        builder: (context, position, _) {
-                          final currentMs = (isSeeking
-                                  ? seekValueMs
-                                  : position.inMilliseconds.toDouble())
-                              .clamp(0.0, maxMs);
-                          return Slider(
-                            value: currentMs,
-                            max: maxMs,
-                            activeColor: NovenColors.accentLight,
-                            inactiveColor: Colors.white12,
-                            onChangeStart: onSeekStart,
-                            onChanged: onSeekChange,
-                            onChangeEnd: onSeekEnd,
-                          );
-                        },
-                      ),
-                    ),
-                  ),
-                ],
-              ),
-            ],
-          );
-        },
-      ),
+        return Container(
+          padding: EdgeInsets.symmetric(
+            horizontal: isCompactMobile ? 12 : 16,
+            vertical: isCompactMobile ? 10 : 12,
+          ),
+          decoration: BoxDecoration(
+            color: NovenColors.surface,
+            borderRadius: BorderRadius.circular(20),
+            gradient: LinearGradient(
+              begin: Alignment.centerLeft,
+              end: Alignment.centerRight,
+              colors: [
+                NovenColors.surface,
+                NovenColors.accent.withValues(alpha: 0.2),
+              ],
+            ),
+            border: Border.all(color: Colors.white.withValues(alpha: 0.06)),
+          ),
+          child: isCompactMobile
+              ? _buildCompactMobileLayout(
+                  maxMs: maxMs,
+                  effectiveVolume: effectiveVolume,
+                  isRepeatActive: isRepeatActive,
+                )
+              : _buildWideLayout(
+                  maxMs: maxMs,
+                  effectiveVolume: effectiveVolume,
+                  isRepeatActive: isRepeatActive,
+                ),
+        );
+      },
     );
   }
 }
@@ -312,12 +492,14 @@ class _ModeIconButton extends StatelessWidget {
   final IconData icon;
   final String tooltip;
   final bool isActive;
+  final double minTouchSize;
   final VoidCallback onPressed;
 
   const _ModeIconButton({
     required this.icon,
     required this.tooltip,
     required this.isActive,
+    required this.minTouchSize,
     required this.onPressed,
   });
 
@@ -326,8 +508,10 @@ class _ModeIconButton extends StatelessWidget {
     return Tooltip(
       message: tooltip,
       child: IconButton(
-        visualDensity: VisualDensity.compact,
-        constraints: const BoxConstraints(minWidth: 32, minHeight: 32),
+        constraints: BoxConstraints(
+          minWidth: minTouchSize,
+          minHeight: minTouchSize,
+        ),
         padding: EdgeInsets.zero,
         onPressed: onPressed,
         icon: Column(
@@ -335,7 +519,7 @@ class _ModeIconButton extends StatelessWidget {
           children: [
             Icon(
               icon,
-              size: 18,
+              size: 20,
               color: isActive
                   ? NovenColors.accentLight
                   : NovenColors.silver.withValues(alpha: 0.5),

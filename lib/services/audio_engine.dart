@@ -1,9 +1,13 @@
 import 'dart:async';
+import 'dart:io';
 
 import 'package:flutter/foundation.dart';
 import 'package:flutter_soloud/flutter_soloud.dart';
+import 'package:path/path.dart' as p;
+import 'package:path_provider/path_provider.dart';
 
 import '../models/track.dart';
+import 'android_media_service.dart';
 
 abstract class PlaybackBackend {
   ValueNotifier<Float32List> get fftNotifier;
@@ -41,7 +45,48 @@ abstract class PlaybackBackend {
 }
 
 class AudioEngine implements PlaybackBackend {
+  /// Di Android, MP3 biasa (< 12 MB) tetap pakai [LoadMode.memory] agar seek
+  /// slider responsif (sesuai catatan SoLoud), sedangkan file FLAC/WAV/OGG/M4A
+  /// dan MP3 besar (>= 12 MB) streaming dari disk agar RAM aman di HP.
+  static const int androidDiskModeMp3ThresholdBytes = 12 * 1024 * 1024;
+  static const int desktopDiskModeThresholdBytes = 40 * 1024 * 1024;
+
+  static LoadMode selectLoadMode({
+    required bool isAndroid,
+    required String pathOrUrl,
+    required TrackSourceType sourceType,
+    int? fileSizeBytes,
+  }) {
+    final cleaned = pathOrUrl.split('?').first.split('#').first.toLowerCase();
+    final isMp3 = cleaned.endsWith('.mp3');
+
+    if (isAndroid) {
+      if (sourceType == TrackSourceType.stream) {
+        return isMp3 ? LoadMode.memory : LoadMode.disk;
+      }
+      if (isMp3) {
+        if (fileSizeBytes != null &&
+            fileSizeBytes >= androidDiskModeMp3ThresholdBytes) {
+          return LoadMode.disk;
+        }
+        return LoadMode.memory;
+      }
+      return LoadMode.disk;
+    }
+
+    if (sourceType == TrackSourceType.local &&
+        fileSizeBytes != null &&
+        fileSizeBytes >= desktopDiskModeThresholdBytes) {
+      return LoadMode.disk;
+    }
+    return LoadMode.memory;
+  }
+
   final SoLoud _soloud = SoLoud.instance;
+  final AndroidMediaService _androidMedia;
+
+  AudioEngine({AndroidMediaService? androidMedia})
+      : _androidMedia = androidMedia ?? AndroidMediaService();
 
   AudioSource? _currentSource;
   SoundHandle? _currentHandle;
@@ -192,6 +237,23 @@ class AudioEngine implements PlaybackBackend {
     }
   }
 
+  Future<String> _resolveLocalPlaybackPath(String pathOrUri) async {
+    if (!kIsWeb &&
+        Platform.isAndroid &&
+        pathOrUri.startsWith('content://')) {
+      final tempDir = await getTemporaryDirectory();
+      final cacheDir = p.join(tempDir.path, 'noven_playback_cache');
+      final resolved = await _androidMedia.materializeContentUri(
+        pathOrUri,
+        cacheDirPath: cacheDir,
+      );
+      if (resolved != null && resolved.isNotEmpty) {
+        return resolved;
+      }
+    }
+    return pathOrUri;
+  }
+
   @override
   Future<void> playTrack(Track track, {Duration? startPosition}) async {
     final requestId = ++_playRequestId;
@@ -202,10 +264,36 @@ class AudioEngine implements PlaybackBackend {
     await _stopAndDisposeCurrentSource();
     if (requestId != _playRequestId) return;
 
-    // LoadMode.memory pada 1 lagu aktif saja -> Seek MP3 jadi INSTAN 0ms!
-    final source = track.sourceType == TrackSourceType.local
-        ? await _soloud.loadFile(track.pathOrUrl, mode: LoadMode.memory)
-        : await _soloud.loadUrl(track.pathOrUrl, mode: LoadMode.memory);
+    final isAndroid = !kIsWeb && Platform.isAndroid;
+    late final AudioSource source;
+
+    if (track.sourceType == TrackSourceType.local) {
+      final effectivePath = await _resolveLocalPlaybackPath(track.pathOrUrl);
+      if (requestId != _playRequestId) return;
+
+      int? fileSizeBytes;
+      try {
+        final file = File(effectivePath);
+        if (await file.exists()) {
+          fileSizeBytes = await file.length();
+        }
+      } catch (_) {}
+
+      final mode = selectLoadMode(
+        isAndroid: isAndroid,
+        pathOrUrl: effectivePath,
+        sourceType: TrackSourceType.local,
+        fileSizeBytes: fileSizeBytes,
+      );
+      source = await _soloud.loadFile(effectivePath, mode: mode);
+    } else {
+      final mode = selectLoadMode(
+        isAndroid: isAndroid,
+        pathOrUrl: track.pathOrUrl,
+        sourceType: TrackSourceType.stream,
+      );
+      source = await _soloud.loadUrl(track.pathOrUrl, mode: mode);
+    }
 
     // Jika sudah ada klik play lagu lain saat load berjalan, buang source ini
     // supaya suara tidak bertumpuk.

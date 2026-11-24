@@ -65,6 +65,7 @@ class AlbumDetailView extends StatelessWidget {
             IconButton(
               tooltip: 'Kembali ke Home',
               onPressed: onBack,
+              constraints: const BoxConstraints(minWidth: 48, minHeight: 48),
               style: IconButton.styleFrom(
                 backgroundColor: NovenColors.surface,
                 foregroundColor: Colors.white,
@@ -89,32 +90,35 @@ class AlbumDetailView extends StatelessWidget {
         const SizedBox(height: 14),
 
         // Album Hero Header Card
-        Container(
-          padding: const EdgeInsets.all(18),
-          decoration: BoxDecoration(
-            borderRadius: BorderRadius.circular(22),
-            gradient: const LinearGradient(
-              begin: Alignment.topLeft,
-              end: Alignment.bottomRight,
-              colors: [
-                NovenColors.accent,
-                Color(0xFF473C78),
-                NovenColors.surface,
-              ],
-            ),
-            border: Border.all(color: Colors.white.withValues(alpha: 0.08)),
-          ),
-          child: Row(
-            crossAxisAlignment: CrossAxisAlignment.center,
-            children: [
-              CoverArt(
-                track: firstTrack,
-                size: 112,
-                radius: 18,
-                showShadow: true,
+        LayoutBuilder(
+          builder: (context, constraints) {
+            final isCompact = constraints.maxWidth < 400;
+            return Container(
+              padding: EdgeInsets.all(isCompact ? 14 : 18),
+              decoration: BoxDecoration(
+                borderRadius: BorderRadius.circular(22),
+                gradient: const LinearGradient(
+                  begin: Alignment.topLeft,
+                  end: Alignment.bottomRight,
+                  colors: [
+                    NovenColors.accent,
+                    Color(0xFF473C78),
+                    NovenColors.surface,
+                  ],
+                ),
+                border: Border.all(color: Colors.white.withValues(alpha: 0.08)),
               ),
-              const SizedBox(width: 18),
-              Expanded(
+              child: Row(
+                crossAxisAlignment: CrossAxisAlignment.center,
+                children: [
+                  CoverArt(
+                    track: firstTrack,
+                    size: isCompact ? 76 : 112,
+                    radius: 18,
+                    showShadow: true,
+                  ),
+                  SizedBox(width: isCompact ? 14 : 18),
+                  Expanded(
                 child: Column(
                   crossAxisAlignment: CrossAxisAlignment.start,
                   children: [
@@ -211,7 +215,9 @@ class AlbumDetailView extends StatelessWidget {
                 ),
               ),
             ],
-          ),
+            ),
+            );
+          },
         ),
         const SizedBox(height: 14),
 

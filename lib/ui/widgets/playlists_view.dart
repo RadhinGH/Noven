@@ -40,6 +40,8 @@ class PlaylistsView extends StatefulWidget {
   final ValueChanged<List<Track>> onShufflePlaylist;
   final ValueChanged<Track>? onLocateTrack;
   final ValueChanged<Track>? onRemoveTrackFromLibrary;
+  final String? selectedPlaylistId;
+  final ValueChanged<String?>? onSelectedPlaylistChanged;
 
   const PlaylistsView({
     super.key,
@@ -57,6 +59,8 @@ class PlaylistsView extends StatefulWidget {
     required this.onShufflePlaylist,
     this.onLocateTrack,
     this.onRemoveTrackFromLibrary,
+    this.selectedPlaylistId,
+    this.onSelectedPlaylistChanged,
   });
 
   @override
@@ -66,6 +70,14 @@ class PlaylistsView extends StatefulWidget {
 class _PlaylistsViewState extends State<PlaylistsView> {
   String? _selectedPlaylistId;
 
+  String? get _effectiveSelectedId =>
+      widget.selectedPlaylistId ?? _selectedPlaylistId;
+
+  void _setSelectedPlaylistId(String? id) {
+    setState(() => _selectedPlaylistId = id);
+    widget.onSelectedPlaylistChanged?.call(id);
+  }
+
   String _formatDuration(Duration d) {
     final minutes = d.inMinutes.remainder(60).toString().padLeft(2, '0');
     final seconds = d.inSeconds.remainder(60).toString().padLeft(2, '0');
@@ -74,9 +86,10 @@ class _PlaylistsViewState extends State<PlaylistsView> {
 
   Playlist? _resolveSelectedPlaylist() {
     if (widget.playlists.isEmpty) return null;
-    if (_selectedPlaylistId != null) {
+    final activeId = _effectiveSelectedId;
+    if (activeId != null) {
       for (final p in widget.playlists) {
-        if (p.id == _selectedPlaylistId) return p;
+        if (p.id == activeId) return p;
       }
     }
     return widget.isDesktop ? widget.playlists.first : null;
@@ -195,13 +208,13 @@ class _PlaylistsViewState extends State<PlaylistsView> {
                         ),
                       ],
                     )
-                  : (selected != null && _selectedPlaylistId != null)
+                  : (selected != null && _effectiveSelectedId != null)
                   ? _buildPlaylistDetail(
                       selected,
                       trackMap,
                       showBackButton: true,
                     )
-                  : _buildPlaylistList(trackMap, _selectedPlaylistId),
+                  : _buildPlaylistList(trackMap, _effectiveSelectedId),
             ),
           ],
         );
@@ -219,9 +232,10 @@ class _PlaylistsViewState extends State<PlaylistsView> {
         borderRadius: BorderRadius.circular(20),
         border: Border.all(color: Colors.white.withValues(alpha: 0.06)),
       ),
-      child: Column(
-        mainAxisSize: MainAxisSize.min,
-        children: [
+      child: SingleChildScrollView(
+        child: Column(
+          mainAxisSize: MainAxisSize.min,
+          children: [
           Icon(
             Icons.queue_music_rounded,
             size: 48,
@@ -253,6 +267,7 @@ class _PlaylistsViewState extends State<PlaylistsView> {
           ),
         ],
       ),
+      ),
     );
   }
 
@@ -274,7 +289,7 @@ class _PlaylistsViewState extends State<PlaylistsView> {
 
         return InkWell(
           borderRadius: BorderRadius.circular(16),
-          onTap: () => setState(() => _selectedPlaylistId = pl.id),
+          onTap: () => _setSelectedPlaylistId(pl.id),
           child: Container(
             padding: const EdgeInsets.all(12),
             decoration: BoxDecoration(
@@ -338,8 +353,8 @@ class _PlaylistsViewState extends State<PlaylistsView> {
                         case 'rename':
                           _promptRenamePlaylist(pl);
                         case 'delete':
-                          if (_selectedPlaylistId == pl.id) {
-                            setState(() => _selectedPlaylistId = null);
+                          if (_effectiveSelectedId == pl.id) {
+                            _setSelectedPlaylistId(null);
                           }
                           widget.onDeletePlaylist(pl.id);
                       }
@@ -387,22 +402,25 @@ class _PlaylistsViewState extends State<PlaylistsView> {
         children: [
           if (showBackButton) ...[
             TextButton.icon(
-              onPressed: () => setState(() => _selectedPlaylistId = null),
+              onPressed: () => _setSelectedPlaylistId(null),
               icon: const Icon(Icons.arrow_back_rounded, size: 18),
               label: const Text('Semua Playlist'),
             ),
             const SizedBox(height: 6),
           ],
-          Row(
-            children: [
-              CoverArt(
-                track: coverTrack,
-                size: 76,
-                radius: 16,
-                showShadow: true,
-              ),
-              const SizedBox(width: 16),
-              Expanded(
+          LayoutBuilder(
+            builder: (context, constraints) {
+              final isCompact = constraints.maxWidth < 380;
+              return Row(
+                children: [
+                  CoverArt(
+                    track: coverTrack,
+                    size: isCompact ? 58 : 76,
+                    radius: 16,
+                    showShadow: true,
+                  ),
+                  SizedBox(width: isCompact ? 12 : 16),
+                  Expanded(
                 child: Column(
                   crossAxisAlignment: CrossAxisAlignment.start,
                   children: [
@@ -463,6 +481,8 @@ class _PlaylistsViewState extends State<PlaylistsView> {
                 ),
               ),
             ],
+          );
+            },
           ),
           const SizedBox(height: 16),
           Expanded(
@@ -599,11 +619,14 @@ class _PlaylistsViewState extends State<PlaylistsView> {
                                     if (!track.isAvailable &&
                                         widget.onLocateTrack != null)
                                       IconButton(
-                                        visualDensity: VisualDensity.compact,
+                                        constraints: const BoxConstraints(
+                                          minWidth: 48,
+                                          minHeight: 48,
+                                        ),
                                         tooltip: 'Locate ulang file',
                                         icon: const Icon(
                                           Icons.folder_open_rounded,
-                                          size: 17,
+                                          size: 19,
                                           color: Colors.amberAccent,
                                         ),
                                         onPressed: () =>
@@ -632,11 +655,14 @@ class _PlaylistsViewState extends State<PlaylistsView> {
                                       ),
                                     ],
                                     IconButton(
-                                      visualDensity: VisualDensity.compact,
+                                      constraints: const BoxConstraints(
+                                        minWidth: 48,
+                                        minHeight: 48,
+                                      ),
                                       tooltip: 'Hapus dari Playlist',
                                       icon: Icon(
                                         Icons.close_rounded,
-                                        size: 17,
+                                        size: 19,
                                         color: NovenColors.silver.withValues(
                                           alpha: 0.65,
                                         ),

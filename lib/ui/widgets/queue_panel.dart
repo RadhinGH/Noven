@@ -72,16 +72,20 @@ class _QueuePanelState extends State<QueuePanel> {
               Expanded(
                 child: Row(
                   children: [
-                    _HeaderTabPill(
-                      label: 'Queue (${widget.playQueue.length})',
-                      isSelected: activeShowQueue,
-                      onTap: () => setState(() => _showQueue = true),
+                    Flexible(
+                      child: _HeaderTabPill(
+                        label: 'Queue (${widget.playQueue.length})',
+                        isSelected: activeShowQueue,
+                        onTap: () => setState(() => _showQueue = true),
+                      ),
                     ),
                     const SizedBox(width: 8),
-                    _HeaderTabPill(
-                      label: 'All Tracks (${widget.allTracks.length})',
-                      isSelected: !activeShowQueue,
-                      onTap: () => setState(() => _showQueue = false),
+                    Flexible(
+                      child: _HeaderTabPill(
+                        label: 'All Tracks (${widget.allTracks.length})',
+                        isSelected: !activeShowQueue,
+                        onTap: () => setState(() => _showQueue = false),
+                      ),
                     ),
                   ],
                 ),
@@ -123,15 +127,14 @@ class _QueuePanelState extends State<QueuePanel> {
               Tooltip(
                 message: 'Kosongkan Queue',
                 child: IconButton(
-                  visualDensity: VisualDensity.compact,
                   constraints: const BoxConstraints(
-                    minWidth: 30,
-                    minHeight: 30,
+                    minWidth: 48,
+                    minHeight: 48,
                   ),
                   padding: EdgeInsets.zero,
                   icon: Icon(
                     Icons.delete_sweep_rounded,
-                    size: 18,
+                    size: 20,
                     color: NovenColors.silver.withValues(alpha: 0.72),
                   ),
                   onPressed: widget.onClearQueue,
@@ -255,16 +258,15 @@ class _QueuePanelState extends State<QueuePanel> {
                       ),
                     ),
                     IconButton(
-                      visualDensity: VisualDensity.compact,
                       constraints: const BoxConstraints(
-                        minWidth: 28,
-                        minHeight: 28,
+                        minWidth: 48,
+                        minHeight: 48,
                       ),
                       padding: EdgeInsets.zero,
                       tooltip: 'Hapus dari Queue',
                       icon: Icon(
                         Icons.close_rounded,
-                        size: 16,
+                        size: 18,
                         color: NovenColors.silver.withValues(alpha: 0.6),
                       ),
                       onPressed: () => widget.onRemoveFromQueue(index),
@@ -467,28 +469,36 @@ class _HeaderTabPill extends StatelessWidget {
     return InkWell(
       borderRadius: BorderRadius.circular(16),
       onTap: onTap,
-      child: AnimatedContainer(
-        duration: const Duration(milliseconds: 180),
-        padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 6),
-        decoration: BoxDecoration(
-          borderRadius: BorderRadius.circular(16),
-          color: isSelected
-              ? NovenColors.accent.withValues(alpha: 0.9)
-              : NovenColors.surface,
-          border: Border.all(
-            color: isSelected
-                ? NovenColors.accentLight.withValues(alpha: 0.8)
-                : Colors.white.withValues(alpha: 0.06),
-          ),
-        ),
-        child: Text(
-          label,
-          style: TextStyle(
-            fontSize: 12,
-            fontWeight: isSelected ? FontWeight.bold : FontWeight.w500,
-            color: isSelected
-                ? Colors.white
-                : NovenColors.silver.withValues(alpha: 0.78),
+      child: ConstrainedBox(
+        constraints: const BoxConstraints(minHeight: 48),
+        child: Center(
+          widthFactor: 1,
+          child: AnimatedContainer(
+            duration: const Duration(milliseconds: 180),
+            padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 7),
+            decoration: BoxDecoration(
+              borderRadius: BorderRadius.circular(16),
+              color: isSelected
+                  ? NovenColors.accent.withValues(alpha: 0.9)
+                  : NovenColors.surface,
+              border: Border.all(
+                color: isSelected
+                    ? NovenColors.accentLight.withValues(alpha: 0.8)
+                    : Colors.white.withValues(alpha: 0.06),
+              ),
+            ),
+            child: Text(
+              label,
+              maxLines: 1,
+              overflow: TextOverflow.ellipsis,
+              style: TextStyle(
+                fontSize: 12,
+                fontWeight: isSelected ? FontWeight.bold : FontWeight.w500,
+                color: isSelected
+                    ? Colors.white
+                    : NovenColors.silver.withValues(alpha: 0.78),
+              ),
+            ),
           ),
         ),
       ),

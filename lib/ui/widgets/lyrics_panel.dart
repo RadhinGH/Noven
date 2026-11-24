@@ -194,12 +194,15 @@ class _LyricsPanelState extends State<LyricsPanel> {
                       ? 'Lihat Lirik'
                       : 'Lihat Cover Album',
                   child: IconButton(
-                    visualDensity: VisualDensity.compact,
+                    constraints: const BoxConstraints(
+                      minWidth: 48,
+                      minHeight: 48,
+                    ),
                     icon: Icon(
                       _showCoverOverride
                           ? Icons.lyrics_rounded
                           : Icons.image_rounded,
-                      size: 18,
+                      size: 20,
                       color: NovenColors.silver,
                     ),
                     onPressed: () {
@@ -213,10 +216,13 @@ class _LyricsPanelState extends State<LyricsPanel> {
                 Tooltip(
                   message: 'Cari lirik online',
                   child: IconButton(
-                    visualDensity: VisualDensity.compact,
+                    constraints: const BoxConstraints(
+                      minWidth: 48,
+                      minHeight: 48,
+                    ),
                     icon: const Icon(
                       Icons.refresh_rounded,
-                      size: 18,
+                      size: 20,
                       color: NovenColors.silver,
                     ),
                     onPressed: widget.onRefreshLyrics,
@@ -283,7 +289,9 @@ class _LyricsPanelState extends State<LyricsPanel> {
       onTap: item.time != null ? () => widget.onSeek(item.time!) : null,
       child: AnimatedContainer(
         duration: const Duration(milliseconds: 220),
-        padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 7),
+        constraints: const BoxConstraints(minHeight: 48),
+        alignment: Alignment.centerLeft,
+        padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 10),
         margin: const EdgeInsets.symmetric(vertical: 2),
         decoration: BoxDecoration(
           borderRadius: BorderRadius.circular(10),
@@ -311,17 +319,18 @@ class _LyricsPanelState extends State<LyricsPanel> {
     return LayoutBuilder(
       builder: (context, constraints) {
         // Sisakan ruang untuk judul, artis, dan pill status di bawah cover
-        final availableForCover = (constraints.maxHeight - 74).clamp(64.0, 180.0);
+        final availableForCover = (constraints.maxHeight - 92).clamp(44.0, 180.0);
         final coverSize = availableForCover.clamp(
-          64.0,
-          constraints.maxWidth.clamp(64.0, 180.0),
+          44.0,
+          constraints.maxWidth.clamp(44.0, 180.0),
         );
 
         return Center(
-          child: Column(
-            mainAxisAlignment: MainAxisAlignment.center,
-            mainAxisSize: MainAxisSize.min,
-            children: [
+          child: SingleChildScrollView(
+            child: Column(
+              mainAxisAlignment: MainAxisAlignment.center,
+              mainAxisSize: MainAxisSize.min,
+              children: [
               CoverArt(
                 track: track,
                 size: coverSize,
@@ -396,6 +405,7 @@ class _LyricsPanelState extends State<LyricsPanel> {
                       ),
               ),
             ],
+            ),
           ),
         );
       },

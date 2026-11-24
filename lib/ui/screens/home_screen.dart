@@ -7,6 +7,7 @@ import 'package:flutter/material.dart';
 
 import '../../controllers/library_controller.dart';
 import '../../models/track.dart';
+import '../../services/android_media_service.dart';
 import '../../sources/local_source.dart';
 import '../theme/noven_colors.dart';
 import '../widgets/album_detail_view.dart';
@@ -45,6 +46,7 @@ class _HomeScreenState extends State<HomeScreen> with WidgetsBindingObserver {
 
   int _selectedMenuIndex = 0; // 0 = Home, 1 = Library, 2 = Playlists, 3 = Sources
   String? _selectedAlbumName;
+  String? _selectedMobilePlaylistId;
   final TextEditingController _searchController = TextEditingController();
   String _searchQuery = '';
 
@@ -114,6 +116,168 @@ class _HomeScreenState extends State<HomeScreen> with WidgetsBindingObserver {
     final result = await _controller.importDroppedPaths(paths);
     if (!mounted) return;
     _showImportFeedback(result);
+  }
+
+  Future<bool> _showRationaleDialog({
+    required String title,
+    required String body,
+    required String confirmLabel,
+  }) async {
+    final approved = await showDialog<bool>(
+      context: context,
+      builder: (dialogCtx) => AlertDialog(
+        backgroundColor: NovenColors.surface,
+        title: Text(title),
+        content: Text(
+          body,
+          style: TextStyle(color: NovenColors.silver.withValues(alpha: 0.9)),
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.of(dialogCtx).pop(false),
+            child: const Text('Nanti Saja'),
+          ),
+          FilledButton(
+            onPressed: () => Navigator.of(dialogCtx).pop(true),
+            child: Text(confirmLabel),
+          ),
+        ],
+      ),
+    );
+    return approved ?? false;
+  }
+
+  Future<void> _showOpenSettingsDialog({
+    required String title,
+    required String body,
+  }) async {
+    final open = await showDialog<bool>(
+      context: context,
+      builder: (dialogCtx) => AlertDialog(
+        backgroundColor: NovenColors.surface,
+        title: Text(title),
+        content: Text(
+          body,
+          style: TextStyle(color: NovenColors.silver.withValues(alpha: 0.9)),
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.of(dialogCtx).pop(false),
+            child: const Text('Tutup'),
+          ),
+          FilledButton.icon(
+            onPressed: () => Navigator.of(dialogCtx).pop(true),
+            icon: const Icon(Icons.settings_rounded, size: 18),
+            label: const Text('Buka Pengaturan'),
+          ),
+        ],
+      ),
+    );
+    if (open == true) {
+      await _controller.androidMedia.openAppSettings();
+    }
+  }
+
+  Future<void> _handleScanAndroidAudio() async {
+    if (_controller.isPickingFiles) return;
+
+    var status = await _controller.androidMedia.checkAudioPermission();
+    if (!mounted) return;
+
+    if (status == AndroidPermissionStatus.unsupported) {
+      await _handleImportFiles();
+      return;
+    }
+
+    if (status == AndroidPermissionStatus.permanentlyDenied) {
+      await _showOpenSettingsDialog(
+        title: 'Izin Audio Ditolak Permanen',
+        body:
+            'Noven membutuhkan izin akses audio agar bisa memindai file MP3/FLAC di perangkat kamu. Buka Pengaturan Aplikasi -> Izin -> Musik & Audio lalu izinkan akses.',
+      );
+      return;
+    }
+
+    if (status == AndroidPermissionStatus.denied) {
+      final agreed = await _showRationaleDialog(
+        title: 'Izinkan Akses Musik Lokal',
+        body:
+            'Noven hanya membaca daftar & metadata lagu dari penyimpanan perangkatmu (tanpa menyalin ulang atau mengubah file asli).',
+        confirmLabel: 'Lanjutkan',
+      );
+      if (!agreed || !mounted) return;
+
+      status = await _controller.androidMedia.requestAudioPermission();
+      if (!mounted) return;
+
+      if (status == AndroidPermissionStatus.permanentlyDenied) {
+        await _showOpenSettingsDialog(
+          title: 'Izin Audio Ditolak Permanen',
+          body:
+              'Izin ditolak permanen oleh sistem. Aktifkan izin Musik & Audio di Pengaturan Aplikasi untuk memindai lagu di HP.',
+        );
+        return;
+      }
+      if (status != AndroidPermissionStatus.granted) {
+        _showStatusSnack(
+          'Izin akses audio diperlukan untuk memindai musik di perangkat.',
+        );
+        return;
+      }
+    }
+
+    try {
+      final result = await _controller.scanAndroidDeviceAudio();
+      if (!mounted) return;
+      _showStatusSnack(
+        result.isEmpty
+            ? 'Tidak ditemukan file musik baru di perangkat.'
+            : result.formatFeedback(),
+      );
+    } catch (_) {
+      if (!mounted) return;
+      _showStatusSnack('Gagal memindai audio perangkat.');
+    }
+  }
+
+  Future<void> _handleRequestAndroidNotifications() async {
+    var status = await _controller.androidMedia.checkNotificationPermission();
+    if (!mounted) return;
+
+    if (status == AndroidPermissionStatus.granted) {
+      _showStatusSnack('Izin notifikasi sudah aktif.');
+      return;
+    }
+    if (status == AndroidPermissionStatus.unsupported) return;
+
+    if (status == AndroidPermissionStatus.permanentlyDenied) {
+      await _showOpenSettingsDialog(
+        title: 'Izin Notifikasi Ditolak Permanen',
+        body:
+            'Aktifkan izin Notifikasi di Pengaturan Aplikasi agar kontrol pemutaran musik dapat tampil di panel notifikasi Android.',
+      );
+      return;
+    }
+
+    final agreed = await _showRationaleDialog(
+      title: 'Izinkan Notifikasi Pemutar',
+      body:
+          'Digunakan untuk menampilkan status lagu dan kontrol pemutaran di panel notifikasi Android 13 ke atas.',
+      confirmLabel: 'Izinkan',
+    );
+    if (!agreed || !mounted) return;
+
+    status = await _controller.androidMedia.requestNotificationPermission();
+    if (!mounted) return;
+    if (status == AndroidPermissionStatus.granted) {
+      _showStatusSnack('Izin notifikasi diaktifkan.');
+    } else if (status == AndroidPermissionStatus.permanentlyDenied) {
+      await _showOpenSettingsDialog(
+        title: 'Izin Notifikasi Ditolak Permanen',
+        body:
+            'Aktifkan izin Notifikasi di Pengaturan Aplikasi agar kontrol notifikasi tersedia.',
+      );
+    }
   }
 
   Future<void> _handleRescanFolders() async {
@@ -324,65 +488,101 @@ class _HomeScreenState extends State<HomeScreen> with WidgetsBindingObserver {
     return ListenableBuilder(
       listenable: _controller,
       builder: (context, _) {
+        final canExitApp = !_controller.isSelectionMode &&
+            _selectedAlbumName == null &&
+            _selectedMobilePlaylistId == null &&
+            _selectedMenuIndex == 0;
+
         final scaffold = LayoutBuilder(
           builder: (context, constraints) {
             final isDesktop = constraints.maxWidth >= 860;
             final isTallEnough = constraints.maxHeight >= 560;
 
-            return Scaffold(
-              backgroundColor: NovenColors.bg,
-              body: Row(
-                children: [
-                  if (isDesktop)
-                    NovenNavRail(
-                      selectedIndex: _selectedMenuIndex,
-                      onSelect: (i) => setState(() {
-                        _selectedMenuIndex = i;
-                        _selectedAlbumName = null;
-                      }),
-                      onImportFolder: _handleImportFolder,
-                      onImportFiles: _handleImportFiles,
-                      onAddUrl: _showAddUrlDialog,
-                    ),
-                  Expanded(
-                    child: _buildActivePage(
-                      isDesktop: isDesktop,
-                      isTallEnough: isTallEnough,
-                    ),
+            return PopScope(
+              canPop: canExitApp,
+              onPopInvokedWithResult: (didPop, _) {
+                if (didPop) return;
+                if (_controller.isSelectionMode) {
+                  _controller.exitSelectionMode();
+                  return;
+                }
+                if (_selectedAlbumName != null) {
+                  setState(() => _selectedAlbumName = null);
+                  return;
+                }
+                if (_selectedMobilePlaylistId != null) {
+                  setState(() => _selectedMobilePlaylistId = null);
+                  return;
+                }
+                if (_selectedMenuIndex != 0) {
+                  setState(() => _selectedMenuIndex = 0);
+                }
+              },
+              child: Scaffold(
+                backgroundColor: NovenColors.bg,
+                body: SafeArea(
+                  bottom: false,
+                  child: Row(
+                    children: [
+                      if (isDesktop)
+                        NovenNavRail(
+                          selectedIndex: _selectedMenuIndex,
+                          onSelect: (i) => setState(() {
+                            _selectedMenuIndex = i;
+                            _selectedAlbumName = null;
+                          }),
+                          onImportFolder: _controller.isAndroid
+                              ? _handleScanAndroidAudio
+                              : _handleImportFolder,
+                          onImportFiles: _handleImportFiles,
+                          onAddUrl: _showAddUrlDialog,
+                        ),
+                      Expanded(
+                        child: _buildActivePage(
+                          isDesktop: isDesktop,
+                          isTallEnough: isTallEnough,
+                        ),
+                      ),
+                    ],
                   ),
-                ],
+                ),
+                bottomNavigationBar: isDesktop
+                    ? null
+                    : NavigationBar(
+                        selectedIndex: _selectedMenuIndex,
+                        backgroundColor: NovenColors.surface,
+                        indicatorColor: NovenColors.accent.withValues(
+                          alpha: 0.35,
+                        ),
+                        onDestinationSelected: (index) {
+                          setState(() {
+                            _selectedMenuIndex = index;
+                            _selectedAlbumName = null;
+                            if (index != 2) {
+                              _selectedMobilePlaylistId = null;
+                            }
+                          });
+                        },
+                        destinations: const [
+                          NavigationDestination(
+                            icon: Icon(Icons.home_rounded),
+                            label: 'Home',
+                          ),
+                          NavigationDestination(
+                            icon: Icon(Icons.library_music_rounded),
+                            label: 'Library',
+                          ),
+                          NavigationDestination(
+                            icon: Icon(Icons.queue_music_rounded),
+                            label: 'Playlists',
+                          ),
+                          NavigationDestination(
+                            icon: Icon(Icons.hub_rounded),
+                            label: 'Sources',
+                          ),
+                        ],
+                      ),
               ),
-              bottomNavigationBar: isDesktop
-                  ? null
-                  : NavigationBar(
-                      selectedIndex: _selectedMenuIndex,
-                      backgroundColor: NovenColors.surface,
-                      indicatorColor: NovenColors.accent.withValues(alpha: 0.35),
-                      onDestinationSelected: (index) {
-                        setState(() {
-                          _selectedMenuIndex = index;
-                          _selectedAlbumName = null;
-                        });
-                      },
-                      destinations: const [
-                        NavigationDestination(
-                          icon: Icon(Icons.home_rounded),
-                          label: 'Home',
-                        ),
-                        NavigationDestination(
-                          icon: Icon(Icons.library_music_rounded),
-                          label: 'Library',
-                        ),
-                        NavigationDestination(
-                          icon: Icon(Icons.queue_music_rounded),
-                          label: 'Playlists',
-                        ),
-                        NavigationDestination(
-                          icon: Icon(Icons.hub_rounded),
-                          label: 'Sources',
-                        ),
-                      ],
-                    ),
             );
           },
         );
@@ -652,63 +852,71 @@ class _HomeScreenState extends State<HomeScreen> with WidgetsBindingObserver {
                       ),
                     ],
                   )
-                : SingleChildScrollView(
-                    child: Column(
-                      crossAxisAlignment: CrossAxisAlignment.start,
-                      children: [
-                        _buildHeroBanner(),
-                        const SizedBox(height: 16),
-                        _buildAlbumsSection(albums),
-                        const SizedBox(height: 16),
-                        SizedBox(
-                          height: 240,
-                          child: QueuePanel(
-                            playQueue: playQueue,
-                            allTracks: visibleTracks,
-                            currentTrackId: currentTrack?.id,
-                            isSearchActive: _searchQuery.trim().isNotEmpty,
-                            initialShowQueue: playQueue.isNotEmpty,
-                            onPlayFromQueue: (track) =>
-                                _controller.playTrack(track, playQueue),
-                            onPlayFromAllTracks: (track, list) =>
-                                _controller.playTrack(
-                                  track,
-                                  list,
-                                  resetShuffleCycle: true,
+                : Column(
+                    children: [
+                      Expanded(
+                        child: SingleChildScrollView(
+                          child: Column(
+                            crossAxisAlignment: CrossAxisAlignment.start,
+                            children: [
+                              _buildHeroBanner(),
+                              const SizedBox(height: 14),
+                              _buildAlbumsSection(albums),
+                              const SizedBox(height: 14),
+                              SizedBox(
+                                height: 220,
+                                child: QueuePanel(
+                                  playQueue: playQueue,
+                                  allTracks: visibleTracks,
+                                  currentTrackId: currentTrack?.id,
+                                  isSearchActive:
+                                      _searchQuery.trim().isNotEmpty,
+                                  initialShowQueue: playQueue.isNotEmpty,
+                                  onPlayFromQueue: (track) =>
+                                      _controller.playTrack(track, playQueue),
+                                  onPlayFromAllTracks: (track, list) =>
+                                      _controller.playTrack(
+                                        track,
+                                        list,
+                                        resetShuffleCycle: true,
+                                      ),
+                                  onReorderQueue: _controller.reorderQueue,
+                                  onRemoveFromQueue:
+                                      _controller.removeFromQueue,
+                                  onClearQueue: _controller.clearQueue,
+                                  onPlayNext: _controller.insertPlayNext,
+                                  onAddToQueue: _controller.addToQueue,
+                                  onAddToPlaylist: _promptAddTrackToPlaylist,
+                                  onToggleFavorite: _handleToggleFavorite,
+                                  onEditTrack: _handleEditTrack,
+                                  onRemoveTrack: (track) =>
+                                      _handleRemoveTracks([track.id]),
                                 ),
-                            onReorderQueue: _controller.reorderQueue,
-                            onRemoveFromQueue: _controller.removeFromQueue,
-                            onClearQueue: _controller.clearQueue,
-                            onPlayNext: _controller.insertPlayNext,
-                            onAddToQueue: _controller.addToQueue,
-                            onAddToPlaylist: _promptAddTrackToPlaylist,
-                            onToggleFavorite: _handleToggleFavorite,
-                            onEditTrack: _handleEditTrack,
-                            onRemoveTrack: (track) =>
-                                _handleRemoveTracks([track.id]),
+                              ),
+                              const SizedBox(height: 14),
+                              SizedBox(
+                                height: 250,
+                                child: LyricsPanel(
+                                  track: currentTrack,
+                                  positionListenable:
+                                      _controller.engine.positionNotifier,
+                                  onSeek: _controller.engine.seek,
+                                  isFetching: isFetchingCurrentLyrics,
+                                  onRefreshLyrics: currentTrack == null
+                                      ? null
+                                      : () => _controller.ensureLyricsForTrack(
+                                          currentTrack,
+                                          forceRefresh: true,
+                                        ),
+                                ),
+                              ),
+                            ],
                           ),
                         ),
-                        const SizedBox(height: 16),
-                        SizedBox(
-                          height: 280,
-                          child: LyricsPanel(
-                            track: currentTrack,
-                            positionListenable:
-                                _controller.engine.positionNotifier,
-                            onSeek: _controller.engine.seek,
-                            isFetching: isFetchingCurrentLyrics,
-                            onRefreshLyrics: currentTrack == null
-                                ? null
-                                : () => _controller.ensureLyricsForTrack(
-                                    currentTrack,
-                                    forceRefresh: true,
-                                  ),
-                          ),
-                        ),
-                        const SizedBox(height: 16),
-                        _buildNowPlayingCard(),
-                      ],
-                    ),
+                      ),
+                      const SizedBox(height: 10),
+                      _buildNowPlayingCard(),
+                    ],
                   ),
           ),
         ],
@@ -760,8 +968,10 @@ class _HomeScreenState extends State<HomeScreen> with WidgetsBindingObserver {
     );
 
     final greeting = RichText(
+      maxLines: 1,
+      overflow: TextOverflow.ellipsis,
       text: TextSpan(
-        style: const TextStyle(fontSize: 20),
+        style: TextStyle(fontSize: isDesktop ? 20 : 18),
         children: [
           TextSpan(
             text: '${_greetingText()}, ',
@@ -788,19 +998,26 @@ class _HomeScreenState extends State<HomeScreen> with WidgetsBindingObserver {
         children: [
           Row(
             children: [
-              greeting,
-              const Spacer(),
+              Expanded(child: greeting),
               IconButton(
-                tooltip: 'Import Folder',
-                icon: const Icon(
-                  Icons.folder_open_rounded,
+                constraints: const BoxConstraints(minWidth: 48, minHeight: 48),
+                tooltip: _controller.isAndroid
+                    ? 'Scan Musik HP'
+                    : 'Import Folder',
+                icon: Icon(
+                  _controller.isAndroid
+                      ? Icons.library_music_rounded
+                      : Icons.folder_open_rounded,
                   color: NovenColors.silver,
                 ),
                 onPressed: _controller.isPickingFiles
                     ? null
-                    : _handleImportFolder,
+                    : (_controller.isAndroid
+                          ? _handleScanAndroidAudio
+                          : _handleImportFolder),
               ),
               IconButton(
+                constraints: const BoxConstraints(minWidth: 48, minHeight: 48),
                 tooltip: 'Tambah Lagu',
                 icon: const Icon(Icons.add_rounded, color: NovenColors.silver),
                 onPressed: _controller.isPickingFiles
@@ -1306,9 +1523,19 @@ class _HomeScreenState extends State<HomeScreen> with WidgetsBindingObserver {
                     OutlinedButton.icon(
                       onPressed: _controller.isPickingFiles
                           ? null
-                          : _handleImportFolder,
-                      icon: const Icon(Icons.folder_open_rounded),
-                      label: const Text('Import Folder'),
+                          : (_controller.isAndroid
+                                ? _handleScanAndroidAudio
+                                : _handleImportFolder),
+                      icon: Icon(
+                        _controller.isAndroid
+                            ? Icons.manage_search_rounded
+                            : Icons.folder_open_rounded,
+                      ),
+                      label: Text(
+                        _controller.isAndroid
+                            ? 'Scan Musik HP'
+                            : 'Import Folder',
+                      ),
                     ),
                     FilledButton.icon(
                       onPressed: _controller.isPickingFiles
@@ -1356,6 +1583,7 @@ class _HomeScreenState extends State<HomeScreen> with WidgetsBindingObserver {
           if (isSelectionMode) ...[
             const SizedBox(height: 10),
             Container(
+              width: double.infinity,
               padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 8),
               decoration: BoxDecoration(
                 color: NovenColors.accent.withValues(alpha: 0.18),
@@ -1364,7 +1592,11 @@ class _HomeScreenState extends State<HomeScreen> with WidgetsBindingObserver {
                   color: NovenColors.accentLight.withValues(alpha: 0.45),
                 ),
               ),
-              child: Row(
+              child: Wrap(
+                alignment: WrapAlignment.spaceBetween,
+                crossAxisAlignment: WrapCrossAlignment.center,
+                spacing: 8,
+                runSpacing: 8,
                 children: [
                   Text(
                     '${selectedIds.length} dipilih',
@@ -1373,22 +1605,30 @@ class _HomeScreenState extends State<HomeScreen> with WidgetsBindingObserver {
                       color: Colors.white,
                     ),
                   ),
-                  const Spacer(),
-                  TextButton(
-                    onPressed: () => _controller.selectAllTracks(visibleLocals),
-                    child: const Text('Pilih Semua'),
-                  ),
-                  const SizedBox(width: 6),
-                  FilledButton.icon(
-                    onPressed: selectedIds.isEmpty
-                        ? null
-                        : () => _handleRemoveTracks(selectedIds.toList()),
-                    style: FilledButton.styleFrom(
-                      backgroundColor: Colors.redAccent,
-                      foregroundColor: Colors.white,
-                    ),
-                    icon: const Icon(Icons.delete_outline_rounded, size: 18),
-                    label: Text('Hapus (${selectedIds.length})'),
+                  Wrap(
+                    spacing: 6,
+                    runSpacing: 6,
+                    children: [
+                      TextButton(
+                        onPressed: () =>
+                            _controller.selectAllTracks(visibleLocals),
+                        child: const Text('Pilih Semua'),
+                      ),
+                      FilledButton.icon(
+                        onPressed: selectedIds.isEmpty
+                            ? null
+                            : () => _handleRemoveTracks(selectedIds.toList()),
+                        style: FilledButton.styleFrom(
+                          backgroundColor: Colors.redAccent,
+                          foregroundColor: Colors.white,
+                        ),
+                        icon: const Icon(
+                          Icons.delete_outline_rounded,
+                          size: 18,
+                        ),
+                        label: Text('Hapus (${selectedIds.length})'),
+                      ),
+                    ],
                   ),
                 ],
               ),
@@ -1681,6 +1921,12 @@ class _HomeScreenState extends State<HomeScreen> with WidgetsBindingObserver {
               allTracks: _controller.allKnownTracks,
               currentTrackId: _controller.currentTrack?.id,
               isDesktop: isDesktop,
+              selectedPlaylistId: isDesktop ? null : _selectedMobilePlaylistId,
+              onSelectedPlaylistChanged: (id) {
+                if (!isDesktop && _selectedMobilePlaylistId != id) {
+                  setState(() => _selectedMobilePlaylistId = id);
+                }
+              },
               onCreatePlaylist: (name) => _controller.createPlaylist(name),
               onRenamePlaylist: _controller.renamePlaylist,
               onDeletePlaylist: _controller.deletePlaylist,
@@ -1811,12 +2057,20 @@ class _HomeScreenState extends State<HomeScreen> with WidgetsBindingObserver {
                                 OutlinedButton.icon(
                                   onPressed: _controller.isPickingFiles
                                       ? null
-                                      : _handleImportFolder,
-                                  icon: const Icon(
-                                    Icons.folder_open_rounded,
+                                      : (_controller.isAndroid
+                                            ? _handleScanAndroidAudio
+                                            : _handleImportFolder),
+                                  icon: Icon(
+                                    _controller.isAndroid
+                                        ? Icons.manage_search_rounded
+                                        : Icons.folder_open_rounded,
                                     size: 18,
                                   ),
-                                  label: const Text('Import Folder'),
+                                  label: Text(
+                                    _controller.isAndroid
+                                        ? 'Scan Musik HP'
+                                        : 'Import Folder',
+                                  ),
                                 ),
                                 OutlinedButton.icon(
                                   onPressed: _controller.isPickingFiles
@@ -1828,6 +2082,16 @@ class _HomeScreenState extends State<HomeScreen> with WidgetsBindingObserver {
                                   ),
                                   label: const Text('Tambah File'),
                                 ),
+                                if (_controller.isAndroid)
+                                  OutlinedButton.icon(
+                                    onPressed:
+                                        _handleRequestAndroidNotifications,
+                                    icon: const Icon(
+                                      Icons.notifications_active_outlined,
+                                      size: 18,
+                                    ),
+                                    label: const Text('Izin Notifikasi'),
+                                  ),
                                 if (watchedFolders.isNotEmpty ||
                                     localTracks.isNotEmpty)
                                   OutlinedButton.icon(

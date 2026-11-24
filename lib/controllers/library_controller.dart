@@ -7,6 +7,7 @@ import 'package:flutter/foundation.dart';
 import '../models/playlist.dart';
 import '../models/repeat_mode.dart';
 import '../models/track.dart';
+import '../services/android_media_service.dart';
 import '../services/audio_engine.dart';
 import '../services/cover_cache_service.dart';
 import '../services/library_database.dart';
@@ -60,6 +61,7 @@ class LibraryController extends ChangeNotifier {
   final LocalMusicSource _localSource;
   final OnlineStreamSource _onlineSource;
   final LyricsService _lyricsService;
+  final AndroidMediaService _androidMedia;
   final math.Random _random;
   final Duration _persistInterval;
 
@@ -109,15 +111,17 @@ class LibraryController extends ChangeNotifier {
     LocalMusicSource? localSource,
     OnlineStreamSource? onlineSource,
     LyricsService? lyricsService,
+    AndroidMediaService? androidMedia,
     Duration playbackPersistInterval = const Duration(seconds: 5),
     Duration saveDebounceDuration = const Duration(milliseconds: 450),
     math.Random? random,
     this.onStatusMessage,
-  })  : _engine = playback ?? AudioEngine(),
+  })  : _engine = playback ?? AudioEngine(androidMedia: androidMedia),
         _storage = storage ?? StorageService(),
         _libraryDb = libraryDb ?? LibraryDatabase(),
         _onlineSource = onlineSource ?? OnlineStreamSource(),
         _lyricsService = lyricsService ?? LyricsService(),
+        _androidMedia = androidMedia ?? AndroidMediaService(),
         _persistInterval = playbackPersistInterval,
         _random = random ?? math.Random(),
         _localSource = localSource ??
@@ -136,6 +140,8 @@ class LibraryController extends ChangeNotifier {
   }
 
   PlaybackBackend get engine => _engine;
+  AndroidMediaService get androidMedia => _androidMedia;
+  bool get isAndroid => _androidMedia.isSupported;
   List<MusicSource> get sources => List.unmodifiable(_sources);
   List<Track> get allTracks => List.unmodifiable(_allTracks);
   List<Track> get allKnownTracks => List.unmodifiable(_allKnownTracks);
@@ -490,6 +496,35 @@ class LibraryController extends ChangeNotifier {
       await saveNow(userAction: true);
     }
     return result;
+  }
+
+  /// Scans audio from Android MediaStore (requires audio permission already
+  /// granted) and merges results into SQLite library.
+  Future<ImportResult> scanAndroidDeviceAudio() async {
+    if (_isPickingFiles) return ImportResult.empty;
+    _isPickingFiles = true;
+    notifyListeners();
+    try {
+      String? coverDirPath;
+      try {
+        coverDirPath = await _localSource.getCoversDirPath();
+      } catch (_) {}
+
+      final items = await _androidMedia.scanDeviceAudio(
+        coverDirPath: coverDirPath,
+      );
+      final result = await _localSource.importAndroidMediaTracks(items);
+      if (result.hasChanges || items.isNotEmpty) {
+        await refreshSources();
+        await saveNow(userAction: true);
+      }
+      return result;
+    } finally {
+      if (!_isDisposed) {
+        _isPickingFiles = false;
+        notifyListeners();
+      }
+    }
   }
 
   Future<({int total, int added, int unavailable, int recovered})>

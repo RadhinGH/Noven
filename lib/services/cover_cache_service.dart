@@ -22,6 +22,11 @@ class CoverCacheService {
     return coversDir;
   }
 
+  Future<String> getCoversDirPath() async {
+    final dir = await _getCoversDir();
+    return dir.path;
+  }
+
   /// Saves artwork bytes atomically to disk and returns the file path.
   /// Identical artwork bytes map to the same content-hashed filename.
   Future<String?> saveCoverBytes(Uint8List bytes) async {
